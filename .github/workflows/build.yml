@@ -1,0 +1,227 @@
+name: Build vanilla SM6115 kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_samsung_sm6115
+          ref: lineage-23.2
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lz4 \
+            python3 \
+            rsync
+
+      - name: Show kernel information
+        run: |
+          echo "=== Kernel ==="
+          head -n 30 Makefile
+          echo
+          echo "=== Architecture ==="
+          ls -la arch/arm64/
+          echo
+          echo "=== Defconfigs containing gta4l/gta4l-common ==="
+          find arch/arm64/configs -type f \
+            \( -iname '*gta4l*' -o -iname '*sm6115*' \) \
+            -print || true
+
+      - name: Find device defconfig
+        id: defconfig
+        shell: bash
+        run: |
+          set -e
+
+          DEFCONFIG="$(find arch/arm64/configs -type f \
+            \( -iname '*gta4l*defconfig' -o -iname '*gta4l*config' \) \
+            | head -n 1)"
+
+          if [ -z "$DEFCONFIG" ]; then
+            echo "::error::Could not automatically find a gta4l defconfig."
+            echo "Available defconfigs:"
+            find arch/arm64/configs -type f | sort
+            exit 1
+          fi
+
+          DEFCONFIG="${DEFCONFIG#arch/arm64/configs/}"
+
+          echo "Found defconfig: $DEFCONFIG"
+          echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
+
+      - name: Install Android clang toolchain
+        run: |
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang
+
+          echo "=== Available clang versions ==="
+          find clang -maxdepth 2 -type f -name clang | sort | head -30
+
+      - name: Select clang
+        id: clang
+        shell: bash
+        run: |
+          set -e
+
+          CLANG="$(find "$GITHUB_WORKSPACE/clang" \
+            -type f \
+            -path '*/bin/clang' \
+            | sort -V \
+            | tail -n 1)"
+
+          if [ -z "$CLANG" ]; then
+            echo "::error::Could not find clang."
+            exit 1
+          fi
+
+          CLANG_DIR="$(dirname "$CLANG")"
+          TOOLCHAIN="$(dirname "$CLANG_DIR")"
+
+          echo "Using clang: $CLANG"
+          echo "Toolchain: $TOOLCHAIN"
+
+          echo "clang_dir=$CLANG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare build directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+      - name: Configure kernel
+        env:
+          CLANG_DIR: ${{ steps.clang.outputs.clang_dir }}
+          DEFCONFIG: ${{ steps.defconfig.outputs.name }}
+        run: |
+          set -e
+
+          export PATH="$CLANG_DIR:$PATH"
+
+          make \
+            O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            "$DEFCONFIG"
+
+      - name: Show final kernel configuration
+        run: |
+          echo "=== Kernel configuration ==="
+          grep -E \
+            'CONFIG_(ARM64|SMP|MODULES|KPROBES|KPROBE_EVENTS|BUILD_ARM64_UNCOMPRESSED_KERNEL)' \
+            out/.config || true
+
+      - name: Build kernel
+        env:
+          CLANG_DIR: ${{ steps.clang.outputs.clang_dir }}
+        run: |
+          set -e
+
+          export PATH="$CLANG_DIR:$PATH"
+
+          make \
+            -j"$(nproc)" \
+            O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu-
+
+      - name: Locate kernel image
+        run: |
+          set -e
+
+          echo "=== Kernel output files ==="
+          find out/arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p (%s bytes)\n' \
+            | sort
+
+          echo
+          echo "=== Candidate kernel images ==="
+
+          found=0
+
+          for image in \
+            out/arch/arm64/boot/Image.gz-dtb \
+            out/arch/arm64/boot/Image.gz \
+            out/arch/arm64/boot/Image \
+            out/arch/arm64/boot/Image.lz4 \
+            out/arch/arm64/boot/Image.lz4-dtb
+          do
+            if [ -f "$image" ]; then
+              echo "FOUND: $image"
+              found=1
+            fi
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No usable ARM64 kernel image was produced."
+            exit 1
+          fi
+
+      - name: Collect build artifacts
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          cp -v out/.config artifacts/kernel.config
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp -v out/arch/arm64/boot/Image.gz-dtb artifacts/
+          fi
+
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp -v out/arch/arm64/boot/Image.gz artifacts/
+          fi
+
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp -v out/arch/arm64/boot/Image artifacts/
+          fi
+
+          if [ -f out/arch/arm64/boot/Image.lz4 ]; then
+            cp -v out/arch/arm64/boot/Image.lz4 artifacts/
+          fi
+
+          if [ -f out/arch/arm64/boot/Image.lz4-dtb ]; then
+            cp -v out/arch/arm64/boot/Image.lz4-dtb artifacts/
+          fi
+
+          echo
+          echo "=== DTBs ==="
+          find out/arch/arm64/boot/dts \
+            -type f \
+            \( -name '*.dtb' -o -name '*.dtbo' \) \
+            -print \
+            2>/dev/null \
+            | sort \
+            | head -100 || true
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta4l-vanilla-kernel
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
