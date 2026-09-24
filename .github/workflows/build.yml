@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      # ============================================================
+      # Kernel source
+      # ============================================================
+
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -18,8 +22,14 @@ jobs:
           ref: lineage-23.2
           fetch-depth: 1
 
+      # ============================================================
+      # Build dependencies
+      # ============================================================
+
       - name: Install build dependencies
         run: |
+          set -e
+
           sudo apt-get update
 
           sudo apt-get install -y \
@@ -36,17 +46,23 @@ jobs:
             wget \
             xz-utils
 
+      # ============================================================
+      # Inspect kernel source
+      # ============================================================
+
       - name: Show kernel information
         run: |
           echo "========================================"
           echo "Kernel Makefile"
           echo "========================================"
+
           head -n 30 Makefile
 
           echo
           echo "========================================"
           echo "ARM64 directory"
           echo "========================================"
+
           ls -la arch/arm64/
 
           echo
@@ -61,6 +77,10 @@ jobs:
             \) \
             -print \
             | sort || true
+
+      # ============================================================
+      # Find device defconfig
+      # ============================================================
 
       - name: Find device defconfig
         id: defconfig
@@ -92,12 +112,17 @@ jobs:
 
           DEFCONFIG="${DEFCONFIG#arch/arm64/configs/}"
 
+          echo
           echo "========================================"
-          echo "Selected defconfig:"
+          echo "Selected defconfig"
+          echo "========================================"
           echo "$DEFCONFIG"
-          echo "========================================"
 
           echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # LLVM / Clang
+      # ============================================================
 
       - name: Download LLVM toolchain
         run: |
@@ -105,23 +130,29 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/toolchain"
 
-          echo "Downloading LLVM/Clang 12.0.1..."
+          echo "========================================"
+          echo "Downloading LLVM/Clang 12.0.1"
+          echo "========================================"
 
           wget \
             --retry-connrefused \
             --tries=5 \
             --timeout=30 \
             --show-progress \
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz" \
+            -O /tmp/clang.tar.xz
 
-          echo "Extracting toolchain..."
+          echo
+          echo "========================================"
+          echo "Extracting LLVM/Clang"
+          echo "========================================"
 
           tar \
             -xf /tmp/clang.tar.xz \
             -C "$GITHUB_WORKSPACE/toolchain" \
             --strip-components=1
 
-          echo "Toolchain installed."
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
 
           echo
           echo "========================================"
@@ -137,9 +168,19 @@ jobs:
 
           "$GITHUB_WORKSPACE/toolchain/bin/ld.lld" --version
 
+      # ============================================================
+      # Prepare output directory
+      # ============================================================
+
       - name: Prepare build directory
         run: |
+          set -e
+
           mkdir -p "$GITHUB_WORKSPACE/out"
+
+      # ============================================================
+      # Kernel configuration
+      # ============================================================
 
       - name: Configure kernel
         env:
@@ -152,7 +193,10 @@ jobs:
           echo "========================================"
           echo "Configuring kernel"
           echo "========================================"
-          echo "DEFCONFIG=$DEFCONFIG"
+
+          echo "Architecture : arm64"
+          echo "Defconfig    : $DEFCONFIG"
+          echo
 
           make \
             O="$GITHUB_WORKSPACE/out" \
@@ -161,8 +205,14 @@ jobs:
             LLVM_IAS=1 \
             "$DEFCONFIG"
 
+      # ============================================================
+      # Inspect resulting configuration
+      # ============================================================
+
       - name: Show final kernel configuration
         run: |
+          set -e
+
           echo "========================================"
           echo "Important kernel configuration"
           echo "========================================"
@@ -173,7 +223,9 @@ jobs:
             || true
 
           echo
-          echo "Kernel release:"
+          echo "========================================"
+          echo "Kernel version"
+          echo "========================================"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
@@ -181,6 +233,10 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             kernelversion
+
+      # ============================================================
+      # Build kernel
+      # ============================================================
 
       - name: Build kernel
         run: |
@@ -192,6 +248,9 @@ jobs:
           echo "Building kernel"
           echo "========================================"
 
+          echo "CPU threads: $(nproc)"
+          echo
+
           make \
             -j"$(nproc)" \
             O="$GITHUB_WORKSPACE/out" \
@@ -199,12 +258,16 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1
 
+      # ============================================================
+      # Locate kernel image
+      # ============================================================
+
       - name: Locate kernel image
         run: |
           set -e
 
           echo "========================================"
-          echo "Kernel output"
+          echo "Kernel output files"
           echo "========================================"
 
           find out/arch/arm64/boot \
@@ -238,20 +301,28 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
+      # Collect artifacts
+      # ============================================================
+
       - name: Collect build artifacts
         run: |
           set -e
 
           mkdir -p artifacts
 
-          echo "Collecting kernel configuration..."
+          echo "========================================"
+          echo "Collecting kernel configuration"
+          echo "========================================"
 
           cp -v \
             out/.config \
             artifacts/kernel.config
 
           echo
-          echo "Collecting kernel images..."
+          echo "========================================"
+          echo "Collecting kernel images"
+          echo "========================================"
 
           for image in \
             Image.gz-dtb \
@@ -268,10 +339,11 @@ jobs:
           done
 
           echo
-          echo "Collecting DTBs..."
+          echo "========================================"
+          echo "Collecting DTBs / DTBOs"
+          echo "========================================"
 
           if [ -d out/arch/arm64/boot/dts ]; then
-            mkdir -p artifacts/dts
 
             find out/arch/arm64/boot/dts \
               -type f \
@@ -279,8 +351,9 @@ jobs:
                 -name '*.dtb' \
                 -o -name '*.dtbo' \
               \) \
-              -exec cp --parents {} artifacts/ \; \
-              || true
+              -print \
+              | sort
+
           fi
 
           echo
@@ -292,6 +365,10 @@ jobs:
             -type f \
             -printf '%p (%s bytes)\n' \
             | sort
+
+      # ============================================================
+      # Upload artifacts
+      # ============================================================
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
