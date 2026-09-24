@@ -21,6 +21,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
@@ -31,20 +32,35 @@ jobs:
             libssl-dev \
             lz4 \
             python3 \
-            rsync
+            rsync \
+            wget \
+            xz-utils
 
       - name: Show kernel information
         run: |
-          echo "=== Kernel ==="
+          echo "========================================"
+          echo "Kernel Makefile"
+          echo "========================================"
           head -n 30 Makefile
+
           echo
-          echo "=== Architecture ==="
+          echo "========================================"
+          echo "ARM64 directory"
+          echo "========================================"
           ls -la arch/arm64/
+
           echo
-          echo "=== Defconfigs containing gta4l/gta4l-common ==="
+          echo "========================================"
+          echo "Possible gta4l / SM6115 defconfigs"
+          echo "========================================"
+
           find arch/arm64/configs -type f \
-            \( -iname '*gta4l*' -o -iname '*sm6115*' \) \
-            -print || true
+            \( \
+              -iname '*gta4l*' \
+              -o -iname '*sm6115*' \
+            \) \
+            -print \
+            | sort || true
 
       - name: Find device defconfig
         id: defconfig
@@ -52,55 +68,75 @@ jobs:
         run: |
           set -e
 
-          DEFCONFIG="$(find arch/arm64/configs -type f \
-            \( -iname '*gta4l*defconfig' -o -iname '*gta4l*config' \) \
-            | head -n 1)"
+          echo "Searching for gta4l defconfig..."
+
+          DEFCONFIG="$(
+            find arch/arm64/configs -type f \
+              \( \
+                -iname '*gta4l*defconfig' \
+                -o -iname '*gta4l*config' \
+              \) \
+              | sort \
+              | head -n 1
+          )"
 
           if [ -z "$DEFCONFIG" ]; then
             echo "::error::Could not automatically find a gta4l defconfig."
+
+            echo
             echo "Available defconfigs:"
             find arch/arm64/configs -type f | sort
+
             exit 1
           fi
 
           DEFCONFIG="${DEFCONFIG#arch/arm64/configs/}"
 
-          echo "Found defconfig: $DEFCONFIG"
+          echo "========================================"
+          echo "Selected defconfig:"
+          echo "$DEFCONFIG"
+          echo "========================================"
+
           echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
 
-      - name: Install Android clang toolchain
-        run: |
-          git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            clang
-
-          echo "=== Available clang versions ==="
-          find clang -maxdepth 2 -type f -name clang | sort | head -30
-
-      - name: Select clang
-        id: clang
-        shell: bash
+      - name: Download LLVM toolchain
         run: |
           set -e
 
-          CLANG="$(find "$GITHUB_WORKSPACE/clang" \
-            -type f \
-            -path '*/bin/clang' \
-            | sort -V \
-            | tail -n 1)"
+          mkdir -p "$GITHUB_WORKSPACE/toolchain"
 
-          if [ -z "$CLANG" ]; then
-            echo "::error::Could not find clang."
-            exit 1
-          fi
+          echo "Downloading LLVM/Clang 12.0.1..."
 
-          CLANG_DIR="$(dirname "$CLANG")"
-          TOOLCHAIN="$(dirname "$CLANG_DIR")"
+          wget \
+            --retry-connrefused \
+            --tries=5 \
+            --timeout=30 \
+            --show-progress \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04.tar.xz" \
+            -O /tmp/clang.tar.xz
 
-          echo "Using clang: $CLANG"
-          echo "Toolchain: $TOOLCHAIN"
+          echo "Extracting toolchain..."
 
-          echo "clang_dir=$CLANG_DIR" >> "$GITHUB_OUTPUT"
+          tar \
+            -xf /tmp/clang.tar.xz \
+            -C "$GITHUB_WORKSPACE/toolchain" \
+            --strip-components=1
+
+          echo "Toolchain installed."
+
+          echo
+          echo "========================================"
+          echo "Clang version"
+          echo "========================================"
+
+          "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
+
+          echo
+          echo "========================================"
+          echo "LLD version"
+          echo "========================================"
+
+          "$GITHUB_WORKSPACE/toolchain/bin/ld.lld" --version
 
       - name: Prepare build directory
         run: |
@@ -108,57 +144,80 @@ jobs:
 
       - name: Configure kernel
         env:
-          CLANG_DIR: ${{ steps.clang.outputs.clang_dir }}
           DEFCONFIG: ${{ steps.defconfig.outputs.name }}
         run: |
           set -e
 
-          export PATH="$CLANG_DIR:$PATH"
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+
+          echo "========================================"
+          echo "Configuring kernel"
+          echo "========================================"
+          echo "DEFCONFIG=$DEFCONFIG"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
             "$DEFCONFIG"
 
       - name: Show final kernel configuration
         run: |
-          echo "=== Kernel configuration ==="
+          echo "========================================"
+          echo "Important kernel configuration"
+          echo "========================================"
+
           grep -E \
             'CONFIG_(ARM64|SMP|MODULES|KPROBES|KPROBE_EVENTS|BUILD_ARM64_UNCOMPRESSED_KERNEL)' \
-            out/.config || true
+            out/.config \
+            || true
+
+          echo
+          echo "Kernel release:"
+
+          make \
+            O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            kernelversion
 
       - name: Build kernel
-        env:
-          CLANG_DIR: ${{ steps.clang.outputs.clang_dir }}
         run: |
           set -e
 
-          export PATH="$CLANG_DIR:$PATH"
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+
+          echo "========================================"
+          echo "Building kernel"
+          echo "========================================"
 
           make \
             -j"$(nproc)" \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
-            LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu-
+            LLVM_IAS=1
 
       - name: Locate kernel image
         run: |
           set -e
 
-          echo "=== Kernel output files ==="
+          echo "========================================"
+          echo "Kernel output"
+          echo "========================================"
+
           find out/arch/arm64/boot \
-            -maxdepth 2 \
+            -maxdepth 3 \
             -type f \
             -printf '%p (%s bytes)\n' \
             | sort
 
           echo
-          echo "=== Candidate kernel images ==="
+          echo "========================================"
+          echo "Candidate kernel images"
+          echo "========================================"
 
           found=0
 
@@ -186,37 +245,54 @@ jobs:
 
           mkdir -p artifacts
 
-          cp -v out/.config artifacts/kernel.config
+          echo "Collecting kernel configuration..."
 
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp -v out/arch/arm64/boot/Image.gz-dtb artifacts/
-          fi
+          cp -v \
+            out/.config \
+            artifacts/kernel.config
 
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp -v out/arch/arm64/boot/Image.gz artifacts/
-          fi
+          echo
+          echo "Collecting kernel images..."
 
-          if [ -f out/arch/arm64/boot/Image ]; then
-            cp -v out/arch/arm64/boot/Image artifacts/
-          fi
+          for image in \
+            Image.gz-dtb \
+            Image.gz \
+            Image \
+            Image.lz4 \
+            Image.lz4-dtb
+          do
+            if [ -f "out/arch/arm64/boot/$image" ]; then
+              cp -v \
+                "out/arch/arm64/boot/$image" \
+                "artifacts/$image"
+            fi
+          done
 
-          if [ -f out/arch/arm64/boot/Image.lz4 ]; then
-            cp -v out/arch/arm64/boot/Image.lz4 artifacts/
-          fi
+          echo
+          echo "Collecting DTBs..."
 
-          if [ -f out/arch/arm64/boot/Image.lz4-dtb ]; then
-            cp -v out/arch/arm64/boot/Image.lz4-dtb artifacts/
+          if [ -d out/arch/arm64/boot/dts ]; then
+            mkdir -p artifacts/dts
+
+            find out/arch/arm64/boot/dts \
+              -type f \
+              \( \
+                -name '*.dtb' \
+                -o -name '*.dtbo' \
+              \) \
+              -exec cp --parents {} artifacts/ \; \
+              || true
           fi
 
           echo
-          echo "=== DTBs ==="
-          find out/arch/arm64/boot/dts \
+          echo "========================================"
+          echo "Artifacts"
+          echo "========================================"
+
+          find artifacts \
             -type f \
-            \( -name '*.dtb' -o -name '*.dtbo' \) \
-            -print \
-            2>/dev/null \
-            | sort \
-            | head -100 || true
+            -printf '%p (%s bytes)\n' \
+            | sort
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
