@@ -11,9 +11,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 1. Checkout kernel source
-      # ------------------------------------------------------------
+      # ============================================================
+
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -21,9 +23,11 @@ jobs:
           ref: lineage-23.2
           fetch-depth: 1
 
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 2. Install dependencies
-      # ------------------------------------------------------------
+      # ============================================================
+
       - name: Install build dependencies
         run: |
           set -e
@@ -45,33 +49,55 @@ jobs:
             wget \
             xz-utils
 
-      # ------------------------------------------------------------
-      # 3. Inspect kernel source
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 3. Display kernel information
+      # ============================================================
+
       - name: Show kernel information
         run: |
           set -e
 
-          echo "===== Kernel Makefile ====="
+          echo "========================================"
+          echo "Kernel source"
+          echo "========================================"
+
           head -n 30 Makefile
 
           echo
-          echo "===== ARM64 directory ====="
+          echo "========================================"
+          echo "ARM64 directory"
+          echo "========================================"
+
           ls -la arch/arm64/
 
           echo
-          echo "===== Possible device defconfigs ====="
-          find arch/arm64/configs -type f \
-            \( -iname '*gta4l*' -o -iname '*sm6115*' \) \
-            -print | sort || true
+          echo "========================================"
+          echo "Possible GTA4L / SM6115 defconfigs"
+          echo "========================================"
+
+          find arch/arm64/configs \
+            -type f \
+            \( \
+              -iname '*gta4l*' \
+              -o \
+              -iname '*sm6115*' \
+            \) \
+            -print \
+            | sort
 
           echo
-          echo "===== ARM64 32-bit vDSO Makefile ====="
-          sed -n '1,240p' arch/arm64/kernel/vdso32/Makefile
+          echo "========================================"
+          echo "32-bit vDSO Makefile"
+          echo "========================================"
 
-      # ------------------------------------------------------------
-      # 4. Locate gta4l defconfig
-      # ------------------------------------------------------------
+          sed -n '1,180p' arch/arm64/kernel/vdso32/Makefile
+
+
+      # ============================================================
+      # 4. Find GTA4L defconfig
+      # ============================================================
+
       - name: Find device defconfig
         id: defconfig
         shell: bash
@@ -79,7 +105,8 @@ jobs:
           set -e
 
           DEFCONFIG="$(
-            find arch/arm64/configs -type f \
+            find arch/arm64/configs \
+              -type f \
               \( \
                 -iname '*gta4l*defconfig' \
                 -o \
@@ -90,24 +117,29 @@ jobs:
           )"
 
           if [ -z "$DEFCONFIG" ]; then
-            echo "::error::Could not automatically find a gta4l defconfig."
+            echo "::error::Could not automatically find a GTA4L defconfig."
 
             echo
-            echo "Available defconfigs:"
-            find arch/arm64/configs -type f | sort
+            echo "Available ARM64 defconfigs:"
+            find arch/arm64/configs \
+              -type f \
+              | sort
 
             exit 1
           fi
 
           DEFCONFIG="${DEFCONFIG#arch/arm64/configs/}"
 
-          echo "Selected defconfig: $DEFCONFIG"
+          echo "Selected defconfig:"
+          echo "$DEFCONFIG"
 
           echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # 5. Download LLVM/Clang
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 5. Download LLVM 12
+      # ============================================================
+
       - name: Download LLVM toolchain
         run: |
           set -e
@@ -129,37 +161,58 @@ jobs:
           echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
 
           echo
-          echo "===== Clang ====="
-          "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
+          echo "========================================"
+          echo "Clang version"
+          echo "========================================"
+
+          "$GITHUB_WORKSPACE/toolchain/bin/clang" \
+            --version
 
           echo
-          echo "===== LLD ====="
-          "$GITHUB_WORKSPACE/toolchain/bin/ld.lld" --version
+          echo "========================================"
+          echo "LLD version"
+          echo "========================================"
 
-      # ------------------------------------------------------------
-      # 6. Verify 32-bit ARM compatibility toolchain
-      # ------------------------------------------------------------
-      - name: Verify ARM32 compatibility toolchain
+          "$GITHUB_WORKSPACE/toolchain/bin/ld.lld" \
+            --version
+
+
+      # ============================================================
+      # 6. Verify ARM32 GCC
+      # ============================================================
+
+      - name: Verify ARM32 compatibility compiler
         run: |
           set -e
 
-          echo "===== ARM32 GCC ====="
+          echo "========================================"
+          echo "ARM32 GCC"
+          echo "========================================"
+
           arm-linux-gnueabihf-gcc --version
 
           echo
-          echo "===== ARM32 GCC target ====="
+          echo "========================================"
+          echo "ARM32 target"
+          echo "========================================"
+
           arm-linux-gnueabihf-gcc -dumpmachine
 
           echo
-          echo "===== ARM32 ELF tools ====="
+          echo "========================================"
+          echo "ARM32 tools"
+          echo "========================================"
+
           command -v arm-linux-gnueabihf-gcc
           command -v arm-linux-gnueabihf-ld
           command -v arm-linux-gnueabihf-objcopy
           command -v arm-linux-gnueabihf-elfedit
 
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 7. Prepare output directory
-      # ------------------------------------------------------------
+      # ============================================================
+
       - name: Prepare build directory
         run: |
           set -e
@@ -168,9 +221,11 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/out"
 
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 8. Configure kernel
-      # ------------------------------------------------------------
+      # ============================================================
+
       - name: Configure kernel
         env:
           DEFCONFIG: ${{ steps.defconfig.outputs.name }}
@@ -179,7 +234,11 @@ jobs:
 
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
 
-          echo "Using defconfig: $DEFCONFIG"
+          echo "========================================"
+          echo "Configuring kernel"
+          echo "========================================"
+
+          echo "Defconfig: $DEFCONFIG"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
@@ -189,21 +248,28 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- \
             "$DEFCONFIG"
 
-      # ------------------------------------------------------------
-      # 9. Show important configuration
-      # ------------------------------------------------------------
-      - name: Show final kernel configuration
+
+      # ============================================================
+      # 9. Display important configuration
+      # ============================================================
+
+      - name: Show kernel configuration
         run: |
           set -e
 
-          echo "===== Important configuration ====="
+          echo "========================================"
+          echo "Important configuration"
+          echo "========================================"
 
           grep -E \
-            'CONFIG_(ARM64|ARM64_VA_BITS|SMP|MODULES|COMPAT|COMPAT_VDSO|KPROBES|KPROBE_EVENTS|BUILD_ARM64_UNCOMPRESSED_KERNEL|CC_IS_CLANG|LD_IS_LLD)' \
-            out/.config || true
+            'CONFIG_(ARM64|ARM64_VA_BITS|SMP|MODULES|COMPAT|COMPAT_VDSO|KPROBES|KPROBE_EVENTS|CC_IS_CLANG|LD_IS_LLD)' \
+            out/.config \
+            || true
 
           echo
-          echo "===== Kernel version ====="
+          echo "========================================"
+          echo "Kernel version"
+          echo "========================================"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
@@ -213,41 +279,52 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- \
             kernelversion
 
-      # ------------------------------------------------------------
-      # 10. Test the ARM32 Clang target before full build
-      # ------------------------------------------------------------
-      - name: Test ARM32 vDSO compiler target
+
+      # ============================================================
+      # 10. Verify ARM32 GCC can compile
+      # ============================================================
+
+      - name: Test ARM32 GCC
         run: |
           set -e
 
-          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+          echo "========================================"
+          echo "Testing ARM32 GCC"
+          echo "========================================"
 
-          echo "Testing Clang ARM32 target..."
-
-          clang \
-            --target=arm-linux-gnueabihf \
+          arm-linux-gnueabihf-gcc \
             -march=armv8-a \
             -mfloat-abi=soft \
             -mabi=aapcs-linux \
             -c \
             -x c \
             /dev/null \
-            -o /tmp/arm32-test.o
+            -o /tmp/arm32-gcc-test.o
 
-          echo "ARM32 Clang compilation succeeded."
+          file /tmp/arm32-gcc-test.o
 
-          file /tmp/arm32-test.o
+          echo
+          echo "ARM32 GCC test succeeded."
 
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 11. Build kernel
-      # ------------------------------------------------------------
+      #
+      # CC_COMPAT and LD_COMPAT are explicitly supplied here.
+      #
+      # This is important because this kernel tree's vdso32
+      # Makefile uses CC_COMPAT for the 32-bit compatibility vDSO.
+      # ============================================================
+
       - name: Build kernel
         run: |
           set -e
 
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
 
-          echo "Starting kernel build..."
+          echo "========================================"
+          echo "Starting kernel build"
+          echo "========================================"
 
           make \
             -j"$(nproc)" \
@@ -255,16 +332,22 @@ jobs:
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- \
+            CC_COMPAT=arm-linux-gnueabihf-gcc \
+            LD_COMPAT=arm-linux-gnueabihf-ld
 
-      # ------------------------------------------------------------
-      # 12. Locate generated kernel images
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 12. Locate kernel image
+      # ============================================================
+
       - name: Locate kernel image
         run: |
           set -e
 
-          echo "===== ARM64 boot output ====="
+          echo "========================================"
+          echo "ARM64 boot output"
+          echo "========================================"
 
           find out/arch/arm64/boot \
             -maxdepth 3 \
@@ -273,7 +356,9 @@ jobs:
             | sort
 
           echo
-          echo "===== Searching for kernel image ====="
+          echo "========================================"
+          echo "Searching for kernel image"
+          echo "========================================"
 
           found=0
 
@@ -295,24 +380,31 @@ jobs:
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # 13. Collect kernel artifacts
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 13. Collect artifacts
+      # ============================================================
+
       - name: Collect build artifacts
         run: |
           set -e
 
           rm -rf artifacts
+
           mkdir -p artifacts
 
-          echo "===== Copying kernel configuration ====="
+          echo "========================================"
+          echo "Copying kernel configuration"
+          echo "========================================"
 
           cp -v \
             out/.config \
             artifacts/kernel.config
 
           echo
-          echo "===== Copying kernel images ====="
+          echo "========================================"
+          echo "Copying kernel images"
+          echo "========================================"
 
           for image in \
             Image.gz-dtb \
@@ -329,32 +421,48 @@ jobs:
           done
 
           echo
-          echo "===== Copying DTBs ====="
+          echo "========================================"
+          echo "Copying DTBs"
+          echo "========================================"
 
           if [ -d out/arch/arm64/boot/dts ]; then
+
             find out/arch/arm64/boot/dts \
               -type f \
-              \( -name '*.dtb' -o -name '*.dtbo' \) \
+              \( \
+                -name '*.dtb' \
+                -o \
+                -name '*.dtbo' \
+              \) \
               -print \
               | sort
 
             find out/arch/arm64/boot/dts \
               -type f \
-              \( -name '*.dtb' -o -name '*.dtbo' \) \
+              \( \
+                -name '*.dtb' \
+                -o \
+                -name '*.dtbo' \
+              \) \
               -exec cp --parents {} artifacts/ \;
+
           fi
 
           echo
-          echo "===== Artifact contents ====="
+          echo "========================================"
+          echo "Artifact contents"
+          echo "========================================"
 
           find artifacts \
             -type f \
             -printf '%p (%s bytes)\n' \
             | sort
 
-      # ------------------------------------------------------------
+
+      # ============================================================
       # 14. Upload artifacts
-      # ------------------------------------------------------------
+      # ============================================================
+
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
