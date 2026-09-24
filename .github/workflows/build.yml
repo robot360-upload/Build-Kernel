@@ -11,10 +11,9 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # ============================================================
-      # Kernel source
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 1. Checkout kernel source
+      # ------------------------------------------------------------
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -22,10 +21,9 @@ jobs:
           ref: lineage-23.2
           fetch-depth: 1
 
-      # ============================================================
-      # Build dependencies
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 2. Install dependencies
+      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           set -e
@@ -37,6 +35,7 @@ jobs:
             bison \
             build-essential \
             flex \
+            gcc-arm-linux-gnueabihf \
             git \
             libelf-dev \
             libssl-dev \
@@ -46,55 +45,45 @@ jobs:
             wget \
             xz-utils
 
-      # ============================================================
-      # Inspect kernel source
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 3. Inspect kernel source
+      # ------------------------------------------------------------
       - name: Show kernel information
         run: |
-          echo "========================================"
-          echo "Kernel Makefile"
-          echo "========================================"
+          set -e
 
+          echo "===== Kernel Makefile ====="
           head -n 30 Makefile
 
           echo
-          echo "========================================"
-          echo "ARM64 directory"
-          echo "========================================"
-
+          echo "===== ARM64 directory ====="
           ls -la arch/arm64/
 
           echo
-          echo "========================================"
-          echo "Possible gta4l / SM6115 defconfigs"
-          echo "========================================"
-
+          echo "===== Possible device defconfigs ====="
           find arch/arm64/configs -type f \
-            \( \
-              -iname '*gta4l*' \
-              -o -iname '*sm6115*' \
-            \) \
-            -print \
-            | sort || true
+            \( -iname '*gta4l*' -o -iname '*sm6115*' \) \
+            -print | sort || true
 
-      # ============================================================
-      # Find device defconfig
-      # ============================================================
+          echo
+          echo "===== ARM64 32-bit vDSO Makefile ====="
+          sed -n '1,240p' arch/arm64/kernel/vdso32/Makefile
 
+      # ------------------------------------------------------------
+      # 4. Locate gta4l defconfig
+      # ------------------------------------------------------------
       - name: Find device defconfig
         id: defconfig
         shell: bash
         run: |
           set -e
 
-          echo "Searching for gta4l defconfig..."
-
           DEFCONFIG="$(
             find arch/arm64/configs -type f \
               \( \
                 -iname '*gta4l*defconfig' \
-                -o -iname '*gta4l*config' \
+                -o \
+                -iname '*gta4l*config' \
               \) \
               | sort \
               | head -n 1
@@ -112,27 +101,18 @@ jobs:
 
           DEFCONFIG="${DEFCONFIG#arch/arm64/configs/}"
 
-          echo
-          echo "========================================"
-          echo "Selected defconfig"
-          echo "========================================"
-          echo "$DEFCONFIG"
+          echo "Selected defconfig: $DEFCONFIG"
 
           echo "name=$DEFCONFIG" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # LLVM / Clang
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 5. Download LLVM/Clang
+      # ------------------------------------------------------------
       - name: Download LLVM toolchain
         run: |
           set -e
 
           mkdir -p "$GITHUB_WORKSPACE/toolchain"
-
-          echo "========================================"
-          echo "Downloading LLVM/Clang 12.0.1"
-          echo "========================================"
 
           wget \
             --retry-connrefused \
@@ -142,46 +122,55 @@ jobs:
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz" \
             -O /tmp/clang.tar.xz
 
-          echo
-          echo "========================================"
-          echo "Extracting LLVM/Clang"
-          echo "========================================"
-
-          tar \
-            -xf /tmp/clang.tar.xz \
+          tar -xf /tmp/clang.tar.xz \
             -C "$GITHUB_WORKSPACE/toolchain" \
             --strip-components=1
 
           echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
 
           echo
-          echo "========================================"
-          echo "Clang version"
-          echo "========================================"
-
+          echo "===== Clang ====="
           "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
 
           echo
-          echo "========================================"
-          echo "LLD version"
-          echo "========================================"
-
+          echo "===== LLD ====="
           "$GITHUB_WORKSPACE/toolchain/bin/ld.lld" --version
 
-      # ============================================================
-      # Prepare output directory
-      # ============================================================
+      # ------------------------------------------------------------
+      # 6. Verify 32-bit ARM compatibility toolchain
+      # ------------------------------------------------------------
+      - name: Verify ARM32 compatibility toolchain
+        run: |
+          set -e
 
+          echo "===== ARM32 GCC ====="
+          arm-linux-gnueabihf-gcc --version
+
+          echo
+          echo "===== ARM32 GCC target ====="
+          arm-linux-gnueabihf-gcc -dumpmachine
+
+          echo
+          echo "===== ARM32 ELF tools ====="
+          command -v arm-linux-gnueabihf-gcc
+          command -v arm-linux-gnueabihf-ld
+          command -v arm-linux-gnueabihf-objcopy
+          command -v arm-linux-gnueabihf-elfedit
+
+      # ------------------------------------------------------------
+      # 7. Prepare output directory
+      # ------------------------------------------------------------
       - name: Prepare build directory
         run: |
           set -e
 
+          rm -rf "$GITHUB_WORKSPACE/out"
+
           mkdir -p "$GITHUB_WORKSPACE/out"
 
-      # ============================================================
-      # Kernel configuration
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 8. Configure kernel
+      # ------------------------------------------------------------
       - name: Configure kernel
         env:
           DEFCONFIG: ${{ steps.defconfig.outputs.name }}
@@ -190,85 +179,92 @@ jobs:
 
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
 
-          echo "========================================"
-          echo "Configuring kernel"
-          echo "========================================"
-
-          echo "Architecture : arm64"
-          echo "Defconfig    : $DEFCONFIG"
-          echo
+          echo "Using defconfig: $DEFCONFIG"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- \
             "$DEFCONFIG"
 
-      # ============================================================
-      # Inspect resulting configuration
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 9. Show important configuration
+      # ------------------------------------------------------------
       - name: Show final kernel configuration
         run: |
           set -e
 
-          echo "========================================"
-          echo "Important kernel configuration"
-          echo "========================================"
+          echo "===== Important configuration ====="
 
           grep -E \
-            'CONFIG_(ARM64|SMP|MODULES|KPROBES|KPROBE_EVENTS|BUILD_ARM64_UNCOMPRESSED_KERNEL)' \
-            out/.config \
-            || true
+            'CONFIG_(ARM64|ARM64_VA_BITS|SMP|MODULES|COMPAT|COMPAT_VDSO|KPROBES|KPROBE_EVENTS|BUILD_ARM64_UNCOMPRESSED_KERNEL|CC_IS_CLANG|LD_IS_LLD)' \
+            out/.config || true
 
           echo
-          echo "========================================"
-          echo "Kernel version"
-          echo "========================================"
+          echo "===== Kernel version ====="
 
           make \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- \
             kernelversion
 
-      # ============================================================
-      # Build kernel
-      # ============================================================
+      # ------------------------------------------------------------
+      # 10. Test the ARM32 Clang target before full build
+      # ------------------------------------------------------------
+      - name: Test ARM32 vDSO compiler target
+        run: |
+          set -e
 
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+
+          echo "Testing Clang ARM32 target..."
+
+          clang \
+            --target=arm-linux-gnueabihf \
+            -march=armv8-a \
+            -mfloat-abi=soft \
+            -mabi=aapcs-linux \
+            -c \
+            -x c \
+            /dev/null \
+            -o /tmp/arm32-test.o
+
+          echo "ARM32 Clang compilation succeeded."
+
+          file /tmp/arm32-test.o
+
+      # ------------------------------------------------------------
+      # 11. Build kernel
+      # ------------------------------------------------------------
       - name: Build kernel
         run: |
           set -e
 
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
 
-          echo "========================================"
-          echo "Building kernel"
-          echo "========================================"
-
-          echo "CPU threads: $(nproc)"
-          echo
+          echo "Starting kernel build..."
 
           make \
             -j"$(nproc)" \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
-            LLVM_IAS=1
+            LLVM_IAS=1 \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
 
-      # ============================================================
-      # Locate kernel image
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 12. Locate generated kernel images
+      # ------------------------------------------------------------
       - name: Locate kernel image
         run: |
           set -e
 
-          echo "========================================"
-          echo "Kernel output files"
-          echo "========================================"
+          echo "===== ARM64 boot output ====="
 
           find out/arch/arm64/boot \
             -maxdepth 3 \
@@ -277,9 +273,7 @@ jobs:
             | sort
 
           echo
-          echo "========================================"
-          echo "Candidate kernel images"
-          echo "========================================"
+          echo "===== Searching for kernel image ====="
 
           found=0
 
@@ -301,28 +295,24 @@ jobs:
             exit 1
           fi
 
-      # ============================================================
-      # Collect artifacts
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 13. Collect kernel artifacts
+      # ------------------------------------------------------------
       - name: Collect build artifacts
         run: |
           set -e
 
+          rm -rf artifacts
           mkdir -p artifacts
 
-          echo "========================================"
-          echo "Collecting kernel configuration"
-          echo "========================================"
+          echo "===== Copying kernel configuration ====="
 
           cp -v \
             out/.config \
             artifacts/kernel.config
 
           echo
-          echo "========================================"
-          echo "Collecting kernel images"
-          echo "========================================"
+          echo "===== Copying kernel images ====="
 
           for image in \
             Image.gz-dtb \
@@ -339,37 +329,32 @@ jobs:
           done
 
           echo
-          echo "========================================"
-          echo "Collecting DTBs / DTBOs"
-          echo "========================================"
+          echo "===== Copying DTBs ====="
 
           if [ -d out/arch/arm64/boot/dts ]; then
-
             find out/arch/arm64/boot/dts \
               -type f \
-              \( \
-                -name '*.dtb' \
-                -o -name '*.dtbo' \
-              \) \
+              \( -name '*.dtb' -o -name '*.dtbo' \) \
               -print \
               | sort
 
+            find out/arch/arm64/boot/dts \
+              -type f \
+              \( -name '*.dtb' -o -name '*.dtbo' \) \
+              -exec cp --parents {} artifacts/ \;
           fi
 
           echo
-          echo "========================================"
-          echo "Artifacts"
-          echo "========================================"
+          echo "===== Artifact contents ====="
 
           find artifacts \
             -type f \
             -printf '%p (%s bytes)\n' \
             | sort
 
-      # ============================================================
-      # Upload artifacts
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 14. Upload artifacts
+      # ------------------------------------------------------------
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
