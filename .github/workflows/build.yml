@@ -64,9 +64,6 @@ jobs:
 
       # ============================================================
       # EXACT LINEAGEOS CLANG r416183b
-      #
-      # This is the prebuilt compiler referenced by the kernel's
-      # build.config.common.
       # ============================================================
       - name: Clone LineageOS Clang r416183b
         run: |
@@ -92,14 +89,6 @@ jobs:
 
       # ============================================================
       # CONFIGURATION
-      #
-      # Exact GTA4L inputs from BoardConfig:
-      #
-      #   vendor/bengal-perf_defconfig
-      #   vendor/gta4l-common.config
-      #
-      # We merge the fragment using the kernel's own
-      # scripts/kconfig/merge_config.sh.
       # ============================================================
       - name: Configure GTA4L kernel
         working-directory: kernel/samsung/sm6115
@@ -174,12 +163,13 @@ jobs:
           test "$(grep -c '^CONFIG_SHADOW_CALL_STACK=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_GTA4L_DTB=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KERNEL_GZIP=y$' out/.config)" -eq 1
 
           echo
           echo "===== VERIFIED CONFIG ====="
 
           grep -E \
-            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB)=' \
+            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB|CONFIG_KERNEL_GZIP)=' \
             out/.config
 
           echo
@@ -188,10 +178,14 @@ jobs:
       # ============================================================
       # BUILD
       #
-      # No KernelSU
-      # No SUSFS
-      # No patches
-      # No custom kernel modifications
+      # Build BOTH:
+      #
+      #   Image     = raw ARM64 kernel
+      #   Image.gz  = gzip compressed kernel
+      #
+      # Magiskboot extracted the working T505 boot image as a
+      # raw ARM64 Image, so we need Image for the eventual
+      # boot-image replacement.
       # ============================================================
       - name: Build vanilla kernel
         working-directory: kernel/samsung/sm6115
@@ -211,7 +205,7 @@ jobs:
           clang --version
 
           echo
-          echo "===== BUILD IMAGE.GZ ====="
+          echo "===== BUILD RAW IMAGE + COMPRESSED IMAGE ====="
 
           make \
             O=out \
@@ -219,7 +213,7 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             -j"$(nproc)" \
-            Image.gz
+            Image Image.gz
 
       # ============================================================
       # VERIFY OUTPUT
@@ -240,21 +234,32 @@ jobs:
           echo
           echo "===== REQUIRED FILES ====="
 
+          test -f out/arch/arm64/boot/Image
           test -f out/arch/arm64/boot/Image.gz
           test -f out/vmlinux
           test -f out/System.map
           test -f out/.config
 
           echo
-          echo "Image.gz:"
+          echo "===== RAW IMAGE ====="
+
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+
+          echo
+          echo "===== COMPRESSED IMAGE ====="
+
+          file out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
 
           echo
-          echo "vmlinux:"
+          echo "===== VMLINUX ====="
+
           ls -lh out/vmlinux
 
           echo
-          echo "System.map:"
+          echo "===== SYSTEM MAP ====="
+
           ls -lh out/System.map
 
           echo
@@ -263,9 +268,24 @@ jobs:
           sha256sum out/.config
 
           echo
-          echo "===== KERNEL HASH ====="
+          echo "===== RAW KERNEL HASH ====="
+
+          sha256sum out/arch/arm64/boot/Image
+
+          echo
+          echo "===== COMPRESSED KERNEL HASH ====="
 
           sha256sum out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== RAW IMAGE HEADER ====="
+
+          xxd -l 16 out/arch/arm64/boot/Image
+
+          echo
+          echo "===== GZIP HEADER ====="
+
+          xxd -l 16 out/arch/arm64/boot/Image.gz
 
       # ============================================================
       # PACKAGE ARTIFACTS
@@ -275,6 +295,10 @@ jobs:
           set -eux
 
           mkdir -p artifacts
+
+          cp \
+            kernel/samsung/sm6115/out/arch/arm64/boot/Image \
+            artifacts/Image
 
           cp \
             kernel/samsung/sm6115/out/arch/arm64/boot/Image.gz \
@@ -302,6 +326,7 @@ jobs:
 
           echo
           echo "===== ARTIFACTS ====="
+
           ls -lh artifacts/
 
       # ============================================================
