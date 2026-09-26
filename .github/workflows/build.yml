@@ -1,4 +1,4 @@
-name: Build Vanilla SM6115 Kernel - GTA4L
+name: Build KernelSU-Next SM6115 Kernel - GTA4L
 
 on:
   workflow_dispatch:
@@ -8,10 +8,11 @@ permissions:
 
 jobs:
   build:
-    name: Vanilla LineageOS SM6115 / GTA4L
+    name: KernelSU-Next LineageOS SM6115 / GTA4L
     runs-on: ubuntu-24.04
 
     steps:
+
       # ============================================================
       # HOST DEPENDENCIES
       # ============================================================
@@ -26,6 +27,7 @@ jobs:
             bison \
             build-essential \
             ccache \
+            curl \
             flex \
             git \
             libelf-dev \
@@ -88,6 +90,94 @@ jobs:
           toolchain/clang-r416183b/bin/ld.lld --version
 
       # ============================================================
+      # KERNELSU-NEXT INTEGRATION
+      #
+      # KernelSU-Next setup.sh:
+      #
+      #   1. Clones KernelSU-Next
+      #   2. Checks out the requested revision
+      #   3. Creates drivers/kernelsu symlink
+      #   4. Adds kernelsu/ to drivers/Makefile
+      #   5. Adds drivers/kernelsu/Kconfig to drivers/Kconfig
+      #
+      # We pin the exact commit for reproducible builds.
+      # ============================================================
+      - name: Integrate KernelSU-Next
+        working-directory: kernel/samsung/sm6115
+        env:
+          KSU_NEXT_COMMIT: c61d876480976e553060789759cc4b54c9e7d816
+        run: |
+          set -eux
+
+          echo "===== KERNELSU-NEXT COMMIT ====="
+          echo "${KSU_NEXT_COMMIT}"
+
+          echo
+          echo "===== DOWNLOAD PINNED SETUP SCRIPT ====="
+
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_NEXT_COMMIT}/kernel/setup.sh" \
+            -o /tmp/ksun-setup.sh
+
+          chmod +x /tmp/ksun-setup.sh
+
+          echo
+          echo "===== SETUP SCRIPT HELP ====="
+
+          /tmp/ksun-setup.sh --help
+
+          echo
+          echo "===== RUN KERNELSU-NEXT SETUP ====="
+
+          /tmp/ksun-setup.sh "${KSU_NEXT_COMMIT}"
+
+          echo
+          echo "===== VERIFY KERNELSU-NEXT TREE ====="
+
+          test -d KernelSU-Next
+          test -d KernelSU-Next/kernel
+
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+          echo
+          echo "===== KERNELSU-NEXT SYMLINK ====="
+
+          readlink drivers/kernelsu
+
+          echo
+          echo "===== VERIFY KERNEL MAKEFILE HOOK ====="
+
+          grep -n \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile
+
+          echo
+          echo "===== VERIFY KERNEL KCONFIG HOOK ====="
+
+          grep -n \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig
+
+          echo
+          echo "===== VERIFY KERNELSU-NEXT REVISION ====="
+
+          test \
+            "$(git -C KernelSU-Next rev-parse HEAD)" \
+            = \
+            "${KSU_NEXT_COMMIT}"
+
+          git -C KernelSU-Next rev-parse HEAD
+
+          echo
+          echo "===== KERNELSU-NEXT INTEGRATION COMPLETE ====="
+
+      # ============================================================
       # CONFIGURATION
       # ============================================================
       - name: Configure GTA4L kernel
@@ -144,6 +234,28 @@ jobs:
               arch/arm64/configs/vendor/gta4l-common.config
 
           echo
+          echo "===== ADD KERNELSU-NEXT CONFIGURATION ====="
+
+          cat > out/kernelsu-next.config <<'EOF'
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU=y
+          EOF
+
+          cat out/kernelsu-next.config
+
+          echo
+          echo "===== MERGE KERNELSU-NEXT CONFIGURATION ====="
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+              -m \
+              -r \
+              -O out \
+              out/.config \
+              out/kernelsu-next.config
+
+          echo
           echo "===== FINALIZE CONFIG ====="
 
           make \
@@ -161,15 +273,25 @@ jobs:
           test "$(grep -c '^CONFIG_LTO_CLANG=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_CFI_CLANG=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_SHADOW_CALL_STACK=y$' out/.config)" -eq 1
+
           test "$(grep -c '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_GTA4L_DTB=y$' out/.config)" -eq 1
           test "$(grep -c '^CONFIG_KERNEL_GZIP=y$' out/.config)" -eq 1
 
           echo
+          echo "===== VERIFY KERNELSU-NEXT OPTIONS ====="
+
+          test "$(grep -c '^CONFIG_KPROBES=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_HAVE_KPROBES=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KPROBE_EVENTS=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KSU=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_EXT4_FS=y$' out/.config)" -eq 1
+
+          echo
           echo "===== VERIFIED CONFIG ====="
 
           grep -E \
-            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB|CONFIG_KERNEL_GZIP)=' \
+            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB|CONFIG_KERNEL_GZIP|CONFIG_KPROBES|CONFIG_HAVE_KPROBES|CONFIG_KPROBE_EVENTS|CONFIG_KSU|CONFIG_EXT4_FS)=' \
             out/.config
 
           echo
@@ -183,11 +305,11 @@ jobs:
       #   Image     = raw ARM64 kernel
       #   Image.gz  = gzip compressed kernel
       #
-      # Magiskboot extracted the working T505 boot image as a
-      # raw ARM64 Image, so we need Image for the eventual
-      # boot-image replacement.
+      # Your working T505 boot image contains a raw ARM64 kernel
+      # when extracted with Magiskboot, so Image is the important
+      # output for repacking.
       # ============================================================
-      - name: Build vanilla kernel
+      - name: Build KernelSU-Next kernel
         working-directory: kernel/samsung/sm6115
         run: |
           set -eux
@@ -205,6 +327,13 @@ jobs:
           clang --version
 
           echo
+          echo "===== FINAL KERNELSU CONFIG ====="
+
+          grep '^CONFIG_KSU=' out/.config
+          grep '^CONFIG_KPROBES=' out/.config
+          grep '^CONFIG_KPROBE_EVENTS=' out/.config
+
+          echo
           echo "===== BUILD RAW IMAGE + COMPRESSED IMAGE ====="
 
           make \
@@ -218,7 +347,7 @@ jobs:
       # ============================================================
       # VERIFY OUTPUT
       # ============================================================
-      - name: Verify kernel artifacts
+      - name: Verify KernelSU-Next kernel artifacts
         working-directory: kernel/samsung/sm6115
         run: |
           set -eux
@@ -261,6 +390,13 @@ jobs:
           echo "===== SYSTEM MAP ====="
 
           ls -lh out/System.map
+
+          echo
+          echo "===== KERNELSU CONFIG ====="
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_KPROBES|CONFIG_HAVE_KPROBES|CONFIG_KPROBE_EVENTS|CONFIG_EXT4_FS)=' \
+            out/.config
 
           echo
           echo "===== FINAL CONFIG HASH ====="
@@ -306,7 +442,7 @@ jobs:
 
           cp \
             kernel/samsung/sm6115/out/.config \
-            artifacts/gta4l.config
+            artifacts/gta4l-kernelsu-next.config
 
           cp \
             kernel/samsung/sm6115/out/System.map \
@@ -324,6 +460,18 @@ jobs:
             kernel/samsung/sm6115/arch/arm64/configs/vendor/gta4l-common.config \
             artifacts/gta4l-common.config
 
+          cp \
+            kernel/samsung/sm6115/out/kernelsu-next.config \
+            artifacts/kernelsu-next.config
+
+          echo
+          echo "===== KERNELSU-NEXT REVISION ====="
+
+          git \
+            -C kernel/samsung/sm6115/KernelSU-Next \
+            rev-parse HEAD \
+            > artifacts/kernelsu-next.commit
+
           echo
           echo "===== ARTIFACTS ====="
 
@@ -332,10 +480,10 @@ jobs:
       # ============================================================
       # UPLOAD
       # ============================================================
-      - name: Upload vanilla kernel artifacts
+      - name: Upload KernelSU-Next kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gta4l-vanilla-kernel
+          name: gta4l-kernelsu-next-kernel
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
