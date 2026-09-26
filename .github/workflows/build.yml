@@ -3,20 +3,31 @@ name: Build Vanilla SM6115 Kernel - GTA4L
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Vanilla LineageOS SM6115 / GTA4L
     runs-on: ubuntu-24.04
 
     steps:
+      # ============================================================
+      # HOST DEPENDENCIES
+      # ============================================================
       - name: Install build dependencies
         run: |
+          set -eux
+
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
             build-essential \
             ccache \
             flex \
+            git \
             libelf-dev \
             libssl-dev \
             lz4 \
@@ -27,112 +38,279 @@ jobs:
             xz-utils \
             zip
 
-      - name: Checkout LineageOS kernel
-        uses: actions/checkout@v4
-        with:
-          repository: LineageOS/android_kernel_samsung_sm6115
-          ref: lineage-23.2
-          path: kernel/samsung/sm6115
-          fetch-depth: 1
-
-      - name: Download LineageOS Clang r416183b
+      # ============================================================
+      # LINEAGEOS SM6115 KERNEL
+      # ============================================================
+      - name: Clone LineageOS SM6115 kernel
         run: |
+          set -eux
+
+          mkdir -p kernel/samsung
+
+          git clone \
+            --depth=1 \
+            --branch lineage-23.2 \
+            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            kernel/samsung/sm6115
+
+          cd kernel/samsung/sm6115
+
+          echo "===== KERNEL REVISION ====="
+          git rev-parse HEAD
+
+          echo
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+      # ============================================================
+      # EXACT LINEAGEOS CLANG r416183b
+      #
+      # This is the prebuilt compiler referenced by the kernel's
+      # build.config.common.
+      # ============================================================
+      - name: Clone LineageOS Clang r416183b
+        run: |
+          set -eux
+
           mkdir -p toolchain
-          cd toolchain
 
-          wget -q --show-progress \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/lineage-23.2/clang-r416183b.tar.gz \
-            -O clang-r416183b.tar.gz
+          git clone \
+            --depth=1 \
+            --branch lineage-20.0 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            toolchain/clang-r416183b
 
-          mkdir clang-r416183b
-          tar -xzf clang-r416183b.tar.gz -C clang-r416183b
+          echo
+          echo "===== CLANG VERSION ====="
 
-      - name: Prepare kernel configuration
+          toolchain/clang-r416183b/bin/clang --version
+
+          echo
+          echo "===== LLD VERSION ====="
+
+          toolchain/clang-r416183b/bin/ld.lld --version
+
+      # ============================================================
+      # CONFIGURATION
+      #
+      # Exact GTA4L inputs from BoardConfig:
+      #
+      #   vendor/bengal-perf_defconfig
+      #   vendor/gta4l-common.config
+      #
+      # We merge the fragment using the kernel's own
+      # scripts/kconfig/merge_config.sh.
+      # ============================================================
+      - name: Configure GTA4L kernel
         working-directory: kernel/samsung/sm6115
-        env:
-          ARCH: arm64
-          LLVM: "1"
         run: |
-          make O=out ARCH=arm64 \
-            vendor/bengal-perf_defconfig
+          set -eux
 
-          make O=out ARCH=arm64 \
-            vendor/gta4l-common.config
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
 
-          echo "===== FINAL CONFIG CHECK ====="
-          grep -E \
-            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK)=' \
-            out/.config || true
+          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/toolchain/clang-r416183b/bin"
+          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
 
-      - name: Build kernel
-        working-directory: kernel/samsung/sm6115
-        env:
-          ARCH: arm64
-          LLVM: "1"
-          CLANG_PREBUILT_BIN: ${{ github.workspace }}/toolchain/clang-r416183b/bin
-        run: |
-          export PATH="$CLANG_PREBUILT_BIN:$PATH"
+          rm -rf out
+          mkdir -p out
 
-          make O=out \
+          echo "===== TOOLCHAIN CHECK ====="
+
+          command -v clang
+          clang --version
+
+          command -v ld.lld
+          ld.lld --version
+
+          echo
+          echo "===== VERIFY CONFIG FILES ====="
+
+          test -f arch/arm64/configs/vendor/bengal-perf_defconfig
+          test -f arch/arm64/configs/vendor/gta4l-common.config
+
+          echo "bengal-perf_defconfig: OK"
+          echo "gta4l-common.config:   OK"
+
+          echo
+          echo "===== CREATE BASE CONFIG ====="
+
+          make \
+            O=out \
             ARCH=arm64 \
             LLVM=1 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            HOSTLD=ld.lld \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          echo
+          echo "===== MERGE GTA4L FRAGMENT ====="
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+              -m \
+              -r \
+              -O out \
+              out/.config \
+              arch/arm64/configs/vendor/gta4l-common.config
+
+          echo
+          echo "===== FINALIZE CONFIG ====="
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "===== VERIFY CRITICAL OPTIONS ====="
+
+          test "$(grep -c '^CONFIG_COMPAT=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_MODULES=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_LTO_CLANG=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_CFI_CLANG=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_SHADOW_CALL_STACK=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_GTA4L_DTB=y$' out/.config)" -eq 1
+
+          echo
+          echo "===== VERIFIED CONFIG ====="
+
+          grep -E \
+            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB)=' \
+            out/.config
+
+          echo
+          echo "===== CONFIG COMPLETE ====="
+
+      # ============================================================
+      # BUILD
+      #
+      # No KernelSU
+      # No SUSFS
+      # No patches
+      # No custom kernel modifications
+      # ============================================================
+      - name: Build vanilla kernel
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/toolchain/clang-r416183b/bin"
+          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
+
+          echo "===== FINAL COMPILER ====="
+
+          command -v clang
+          clang --version
+
+          echo
+          echo "===== BUILD IMAGE.GZ ====="
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
             -j"$(nproc)" \
             Image.gz
 
-      - name: Verify kernel output
+      # ============================================================
+      # VERIFY OUTPUT
+      # ============================================================
+      - name: Verify kernel artifacts
         working-directory: kernel/samsung/sm6115
         run: |
-          echo "===== KERNEL OUTPUT ====="
+          set -eux
 
-          ls -lh out/arch/arm64/boot/
+          echo "===== BOOT DIRECTORY ====="
 
-          test -f out/arch/arm64/boot/Image.gz
-
-          file out/arch/arm64/boot/Image.gz
+          find out/arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort
 
           echo
-          echo "===== KERNEL CONFIG ====="
-          grep '^CONFIG_COMPAT=' out/.config
-          grep '^CONFIG_MODULES=' out/.config
-          grep '^CONFIG_LTO_CLANG=' out/.config
-          grep '^CONFIG_CFI_CLANG=' out/.config
+          echo "===== REQUIRED FILES ====="
 
-      - name: Collect build artifacts
+          test -f out/arch/arm64/boot/Image.gz
+          test -f out/vmlinux
+          test -f out/System.map
+          test -f out/.config
+
+          echo
+          echo "Image.gz:"
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "vmlinux:"
+          ls -lh out/vmlinux
+
+          echo
+          echo "System.map:"
+          ls -lh out/System.map
+
+          echo
+          echo "===== FINAL CONFIG HASH ====="
+
+          sha256sum out/.config
+
+          echo
+          echo "===== KERNEL HASH ====="
+
+          sha256sum out/arch/arm64/boot/Image.gz
+
+      # ============================================================
+      # PACKAGE ARTIFACTS
+      # ============================================================
+      - name: Prepare artifacts
         run: |
+          set -eux
+
           mkdir -p artifacts
 
-          cp kernel/samsung/sm6115/out/arch/arm64/boot/Image.gz \
+          cp \
+            kernel/samsung/sm6115/out/arch/arm64/boot/Image.gz \
             artifacts/Image.gz
 
-          cp kernel/samsung/sm6115/out/.config \
+          cp \
+            kernel/samsung/sm6115/out/.config \
             artifacts/gta4l.config
 
-          cp kernel/samsung/sm6115/out/System.map \
+          cp \
+            kernel/samsung/sm6115/out/System.map \
             artifacts/System.map
 
-          cp kernel/samsung/sm6115/out/vmlinux \
+          cp \
+            kernel/samsung/sm6115/out/vmlinux \
             artifacts/vmlinux
 
-          tar -czf artifacts/kernel-build-output.tar.gz \
-            -C kernel/samsung/sm6115/out \
-            arch/arm64/boot \
-            include/config \
-            .config
+          cp \
+            kernel/samsung/sm6115/arch/arm64/configs/vendor/bengal-perf_defconfig \
+            artifacts/bengal-perf_defconfig
 
-      - name: Upload kernel artifacts
+          cp \
+            kernel/samsung/sm6115/arch/arm64/configs/vendor/gta4l-common.config \
+            artifacts/gta4l-common.config
+
+          echo
+          echo "===== ARTIFACTS ====="
+          ls -lh artifacts/
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+      - name: Upload vanilla kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gta4l-vanilla-kernel
           path: artifacts/
-          compression-level: 0
           if-no-files-found: error
+          compression-level: 0
