@@ -863,10 +863,10 @@ jobs:
 
       - name: Configure kernel
         working-directory: kernel
-        env:
-          PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
         run: |
           set -e
+
+          export PATH="${CLANG_DIR}/bin:${PATH}"
 
           export ARCH=arm64
           export SUBARCH=arm64
@@ -874,6 +874,20 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+          echo "===== Toolchain ====="
+          command -v make
+          command -v clang
+          command -v ld.lld
+
+          echo
+          make --version
+
+          echo
+          clang --version
+
+          echo
+          ld.lld --version
 
           make \
             O="${OUT_DIR}" \
@@ -911,10 +925,10 @@ jobs:
 
       - name: Build kernel
         working-directory: kernel
-        env:
-          PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
         run: |
           set -e
+
+          export PATH="${CLANG_DIR}/bin:${PATH}"
 
           export ARCH=arm64
           export SUBARCH=arm64
@@ -922,6 +936,20 @@ jobs:
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+          echo "===== Toolchain ====="
+          command -v make
+          command -v clang
+          command -v ld.lld
+
+          echo
+          make --version
+
+          echo
+          clang --version
+
+          echo
+          ld.lld --version
 
           make \
             O="${OUT_DIR}" \
