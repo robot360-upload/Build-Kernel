@@ -1,0 +1,771 @@
+name: Build ReSukiSU - Galaxy Tab A7 SM-T505
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      KERNEL_REPO: LineageOS/android_kernel_samsung_sm6115
+      KERNEL_BRANCH: lineage-23.2
+      CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b
+      CLANG_BRANCH: lineage-20.0
+      CLANG_DIR: ${{ github.workspace }}/clang-r416183b
+      OUT_DIR: ${{ github.workspace }}/out
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Install build dependencies
+      # ------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            gawk \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            python3 \
+            python3-pip \
+            rsync \
+            unzip \
+            zip
+
+      # ------------------------------------------------------------
+      # 2. Clone the actual LineageOS SM6115 kernel
+      # ------------------------------------------------------------
+      - name: Clone LineageOS kernel
+        run: |
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${KERNEL_BRANCH}" \
+            "https://github.com/${KERNEL_REPO}.git" \
+            kernel
+
+          cd kernel
+
+          echo "Kernel commit:"
+          git rev-parse HEAD
+
+          echo "Kernel branch:"
+          git branch --show-current
+
+      # ------------------------------------------------------------
+      # 3. Clone the exact clang used by the working vanilla build
+      # ------------------------------------------------------------
+      - name: Clone clang-r416183b
+        run: |
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${CLANG_BRANCH}" \
+            "https://github.com/${CLANG_REPO}.git" \
+            "${CLANG_DIR}"
+
+          echo "Clang:"
+          "${CLANG_DIR}/bin/clang" --version
+
+      # ------------------------------------------------------------
+      # 4. Add ReSukiSU using its official setup script
+      # ------------------------------------------------------------
+      - name: Setup ReSukiSU
+        working-directory: kernel
+        run: |
+          curl -LSs \
+            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
+            -o /tmp/resukisu-setup.sh
+
+          chmod +x /tmp/resukisu-setup.sh
+
+          /tmp/resukisu-setup.sh
+
+          echo
+          echo "ReSukiSU tree:"
+          test -d KernelSU
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+
+          readlink -f drivers/kernelsu
+
+      # ------------------------------------------------------------
+      # 5. Add the required ReSukiSU configuration
+      # ------------------------------------------------------------
+      - name: Add ReSukiSU kernel config
+        working-directory: kernel
+        run: |
+          CONFIG="arch/arm64/configs/vendor/gta4l-common.config"
+
+          grep -qxF 'CONFIG_KSU=y' "$CONFIG" || \
+            echo 'CONFIG_KSU=y' >> "$CONFIG"
+
+          grep -qxF 'CONFIG_KSU_MANUAL_HOOK=y' "$CONFIG" || \
+            echo 'CONFIG_KSU_MANUAL_HOOK=y' >> "$CONFIG"
+
+          echo "ReSukiSU config:"
+          grep -E '^CONFIG_KSU' "$CONFIG"
+
+      # ------------------------------------------------------------
+      # 6. Patch the REAL 4.19 kernel sources
+      #
+      # These patches are deliberately content-based rather than
+      # line-number based so the workflow fails if the source tree
+      # does not actually match the expected SM6115 4.19 layout.
+      # ------------------------------------------------------------
+      - name: Apply ReSukiSU manual hooks
+        working-directory: kernel
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def insert_once(path, marker, insertion, name):
+              text = read(path)
+
+              if insertion.strip() in text:
+                  print(f"[OK] {name}: already present")
+                  return
+
+              if marker not in text:
+                  raise SystemExit(
+                      f"[FAIL] {name}: anchor not found in {path}"
+                  )
+
+              text = text.replace(marker, insertion + marker, 1)
+              write(path, text)
+              print(f"[OK] {name}: inserted")
+
+          # ========================================================
+          # fs/stat.c
+          # ========================================================
+
+          path = "fs/stat.c"
+          text = read(path)
+
+          stat_declarations = r'''#ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_stat(int *dfd,
+                                     const char __user **filename_user,
+                                     int *flags);
+
+          extern void ksu_handle_newfstat_ret(
+              unsigned int *fd,
+              struct stat __user **statbuf_ptr);
+
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          extern void ksu_handle_fstat64_ret(
+              unsigned long *fd,
+              struct stat64 __user **statbuf_ptr);
+          #endif
+          #endif
+
+          '''
+
+          stat_declarations = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in stat_declarations.splitlines()
+          ) + "\n"
+
+          insert_once(
+              path,
+              "#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)",
+              stat_declarations,
+              "stat declarations"
+          )
+
+          path = "fs/stat.c"
+          text = read(path)
+
+          old = """SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                  struct stat __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          new = """SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+                  struct stat __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          if old not in text:
+              raise SystemExit("[FAIL] stat: newfstatat anchor not found")
+          text = text.replace(old, new, 1)
+
+          old = """SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat(&stat, statbuf);
+
+              return error;
+          }"""
+
+          new = """SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat(&stat, statbuf);
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+
+              return error;
+          }"""
+
+          if old not in text:
+              raise SystemExit("[FAIL] stat: newfstat anchor not found")
+          text = text.replace(old, new, 1)
+
+          old = """SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat64(&stat, statbuf);
+
+              return error;
+          }"""
+
+          new = """SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+          {
+              struct kstat stat;
+              int error = vfs_fstat(fd, &stat);
+
+              if (!error)
+                  error = cp_new_stat64(&stat, statbuf);
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_fstat64_ret(&fd, &statbuf);
+          #endif
+
+              return error;
+          }"""
+
+          if old not in text:
+              raise SystemExit("[FAIL] stat: fstat64 anchor not found")
+          text = text.replace(old, new, 1)
+
+          old = """SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+                  struct stat64 __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          new = """SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+                  struct stat64 __user *, statbuf, int, flag)
+          {
+              struct kstat stat;
+              int error;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+
+              error = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          if old not in text:
+              raise SystemExit("[FAIL] stat: fstatat64 anchor not found")
+          text = text.replace(old, new, 1)
+
+          write(path, text)
+
+          # ========================================================
+          # fs/exec.c
+          # ========================================================
+
+          path = "fs/exec.c"
+          text = read(path)
+
+          exec_declarations = """#ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd,
+                                         struct filename **filename_ptr,
+                                         void *argv,
+                                         void *envp,
+                                         int *flags);
+
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(int *fd,
+                                              struct filename **filename_ptr,
+                                              void *argv,
+                                              void *envp,
+                                              int *flags,
+                                              int *retval);
+          #endif
+
+          """
+
+          exec_declarations = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in exec_declarations.splitlines()
+          ) + "\n"
+
+          marker = """static int do_execveat_common(int fd, struct filename *filename,
+                                struct user_arg_ptr argv,
+                                struct user_arg_ptr envp,
+                                int flags)
+          {"""
+
+          if marker not in text:
+              raise SystemExit("[FAIL] execve: do_execveat_common anchor not found")
+
+          if "ksu_handle_post_execveat" not in text:
+              text = text.replace(
+                  marker,
+                  exec_declarations + marker,
+                  1
+              )
+
+              old = """{
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          }"""
+
+              new = """{
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              int retval;
+
+              ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+
+              retval = __do_execve_file(
+                  fd, filename, argv, envp, flags, NULL);
+
+              ksu_handle_post_execveat(
+                  &fd, &filename, &argv, &envp, &flags, &retval);
+
+              return retval;
+          #else
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          #endif
+          }"""
+
+              if old not in text:
+                  raise SystemExit("[FAIL] execve: function body anchor not found")
+
+              text = text.replace(old, new, 1)
+
+          write(path, text)
+
+          # ========================================================
+          # fs/open.c
+          # ========================================================
+
+          path = "fs/open.c"
+          text = read(path)
+
+          access_decl = """#ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(
+              int *dfd,
+              const char __user **filename_user,
+              int *mode,
+              int *flags);
+          #endif
+
+          """
+
+          access_decl = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in access_decl.splitlines()
+          ) + "\n"
+
+          marker = """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {"""
+
+          if marker not in text:
+              raise SystemExit("[FAIL] faccessat: syscall anchor not found")
+
+          if "ksu_handle_faccessat(&dfd" not in text:
+              text = text.replace(
+                  marker,
+                  access_decl + marker,
+                  1
+              )
+
+              old = """{
+              return do_faccessat(dfd, filename, mode);
+          }"""
+
+              new = """{
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif
+
+              return do_faccessat(dfd, filename, mode);
+          }"""
+
+              if old not in text:
+                  raise SystemExit("[FAIL] faccessat: body anchor not found")
+
+              text = text.replace(old, new, 1)
+
+          write(path, text)
+
+          # ========================================================
+          # fs/read_write.c
+          #
+          # This SM6115 tree is 4.19, so hook read(), not ksys_read().
+          # ========================================================
+
+          path = "fs/read_write.c"
+          text = read(path)
+
+          read_decl = """#ifdef CONFIG_KSU_MANUAL_HOOK
+          extern bool ksu_init_rc_hook __read_mostly;
+          extern __attribute__((cold)) int ksu_handle_sys_read(
+              unsigned int fd,
+              char __user **buf_ptr,
+              size_t *count_ptr);
+          #endif
+
+          """
+
+          read_decl = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in read_decl.splitlines()
+          ) + "\n"
+
+          marker = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+          {"""
+
+          if marker not in text:
+              raise SystemExit("[FAIL] read: syscall anchor not found")
+
+          if "ksu_handle_sys_read(fd, &buf, &count)" not in text:
+              text = text.replace(
+                  marker,
+                  read_decl + marker,
+                  1
+              )
+
+              old = """{
+              return ksys_read(fd, buf, count);
+          }"""
+
+              new = """{
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              if (unlikely(ksu_init_rc_hook))
+                  ksu_handle_sys_read(fd, &buf, &count);
+          #endif
+
+              return ksys_read(fd, buf, count);
+          }"""
+
+              if old not in text:
+                  raise SystemExit("[FAIL] read: body anchor not found")
+
+              text = text.replace(old, new, 1)
+
+          write(path, text)
+
+          # ========================================================
+          # kernel/reboot.c
+          # ========================================================
+
+          path = "kernel/reboot.c"
+          text = read(path)
+
+          reboot_decl = """#ifdef CONFIG_KSU_MANUAL_HOOK
+          extern int ksu_handle_sys_reboot(
+              int magic1,
+              int magic2,
+              unsigned int cmd,
+              void __user **arg);
+          #endif
+
+          """
+
+          reboot_decl = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in reboot_decl.splitlines()
+          ) + "\n"
+
+          marker = """SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int cmd,
+                  void __user *, arg)
+          {"""
+
+          if marker not in text:
+              raise SystemExit("[FAIL] reboot: syscall anchor not found")
+
+          if "ksu_handle_sys_reboot(magic1" not in text:
+              text = text.replace(
+                  marker,
+                  reboot_decl + marker,
+                  1
+              )
+
+              old = """{
+              struct pid_namespace *pid_ns = task_active_pid_ns(current);
+              char buffer[256];
+              int ret = 0;
+
+              /* We only trust the superuser with rebooting the system. */"""
+
+              new = """{
+              struct pid_namespace *pid_ns = task_active_pid_ns(current);
+              char buffer[256];
+              int ret = 0;
+
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+          #endif
+
+              /* We only trust the superuser with rebooting the system. */"""
+
+              if old not in text:
+                  raise SystemExit("[FAIL] reboot: body anchor not found")
+
+              text = text.replace(old, new, 1)
+
+          write(path, text)
+
+          print()
+          print("========================================")
+          print("ReSukiSU hook patching completed")
+          print("========================================")
+
+          # Final source-level verification.
+          required = {
+              "fs/stat.c": [
+                  "ksu_handle_stat(&dfd, &filename, &flag)",
+                  "ksu_handle_newfstat_ret(&fd, &statbuf)",
+                  "ksu_handle_fstat64_ret(&fd, &statbuf)",
+              ],
+              "fs/exec.c": [
+                  "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags)",
+                  "ksu_handle_post_execveat(",
+              ],
+              "fs/open.c": [
+                  "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)",
+              ],
+              "fs/read_write.c": [
+                  "ksu_handle_sys_read(fd, &buf, &count)",
+              ],
+              "kernel/reboot.c": [
+                  "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)",
+              ],
+          }
+
+          for file, needles in required.items():
+              data = read(file)
+              for needle in needles:
+                  if needle not in data:
+                      raise SystemExit(
+                          f"[FAIL] verification: {needle!r} missing from {file}"
+                      )
+              print(f"[PASS] {file}")
+
+          print("[PASS] All required manual hooks are present.")
+          PY
+
+      # ------------------------------------------------------------
+      # 7. Show the actual modifications before compilation
+      # ------------------------------------------------------------
+      - name: Verify source changes
+        working-directory: kernel
+        run: |
+          echo "===== ReSukiSU config ====="
+          grep -E '^CONFIG_KSU' \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          echo
+          echo "===== ReSukiSU source locations ====="
+          grep -R -n \
+            -E 'ksu_handle_(stat|newfstat_ret|fstat64_ret|execveat|post_execveat|faccessat|sys_read|sys_reboot)' \
+            fs/stat.c \
+            fs/exec.c \
+            fs/open.c \
+            fs/read_write.c \
+            kernel/reboot.c
+
+      # ------------------------------------------------------------
+      # 8. Configure kernel
+      # ------------------------------------------------------------
+      - name: Configure kernel
+        working-directory: kernel
+        env:
+          PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+          echo "Using clang:"
+          clang --version
+
+          echo
+          echo "Generating base configuration..."
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          echo
+          echo "Merging GTA4L configuration..."
+
+          scripts/kconfig/merge_config.sh \
+            -m \
+            "${OUT_DIR}/.config" \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "===== Final ReSukiSU config ====="
+
+          grep -E '^CONFIG_KSU(=|_)' \
+            "${OUT_DIR}/.config"
+
+          test "$(grep -c '^CONFIG_KSU=y$' "${OUT_DIR}/.config")" -eq 1
+          test "$(grep -c '^CONFIG_KSU_MANUAL_HOOK=y$' "${OUT_DIR}/.config")" -eq 1
+
+          echo
+          echo "[PASS] CONFIG_KSU=y"
+          echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
+
+      # ------------------------------------------------------------
+      # 9. Build Image + Image.gz
+      # ------------------------------------------------------------
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc)" \
+            Image \
+            Image.gz
+
+      # ------------------------------------------------------------
+      # 10. Verify build outputs
+      # ------------------------------------------------------------
+      - name: Verify kernel outputs
+        run: |
+          set -e
+
+          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          test -f "${OUT_DIR}/arch/arm64/boot/Image.gz"
+          test -f "${OUT_DIR}/vmlinux"
+          test -f "${OUT_DIR}/System.map"
+
+          echo "===== Kernel output ====="
+          ls -lh \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            "${OUT_DIR}/vmlinux" \
+            "${OUT_DIR}/System.map"
+
+          echo
+          echo "===== Image information ====="
+          file "${OUT_DIR}/arch/arm64/boot/Image"
+          file "${OUT_DIR}/arch/arm64/boot/Image.gz"
+
+      # ------------------------------------------------------------
+      # 11. Package everything useful for boot-image repacking
+      # ------------------------------------------------------------
+      - name: Package kernel
+        run: |
+          mkdir -p kernel-artifact
+
+          cp \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/vmlinux" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/System.map" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/.config" \
+            kernel-artifact/kernel.config
+
+          cp \
+            kernel/arch/arm64/configs/vendor/bengal-perf_defconfig \
+            kernel-artifact/
+
+          cp \
+            kernel/arch/arm64/configs/vendor/gta4l-common.config \
+            kernel-artifact/
+
+          tar -czf resukisu-sm6115-kernel.tar.gz \
+            -C kernel-artifact .
+
+          ls -lh resukisu-sm6115-kernel.tar.gz
+
+      # ------------------------------------------------------------
+      # 12. Upload artifact
+      # ------------------------------------------------------------
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resukisu-sm6115-kernel
+          path: resukisu-sm6115-kernel.tar.gz
+          if-no-files-found: error
+          retention-days: 14
