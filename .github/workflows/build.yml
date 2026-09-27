@@ -13,24 +13,16 @@ jobs:
     env:
       KERNEL_REPO: LineageOS/android_kernel_samsung_sm6115
       KERNEL_BRANCH: lineage-23.2
-
       CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b
       CLANG_BRANCH: lineage-20.0
-
       KERNEL_DIR: ${{ github.workspace }}/kernel
       CLANG_DIR: ${{ github.workspace }}/clang-r416183b
       OUT_DIR: ${{ github.workspace }}/out
 
     steps:
-
-      # ============================================================
-      # Dependencies
-      # ============================================================
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             bc \
             bison \
@@ -50,12 +42,10 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
-      # ============================================================
-      # Clone LineageOS kernel
-      # ============================================================
-
       - name: Clone LineageOS SM6115 kernel
         run: |
+          set -e
+
           git clone \
             --depth=1 \
             --single-branch \
@@ -65,20 +55,17 @@ jobs:
 
           cd "${KERNEL_DIR}"
 
-          echo "========================================"
-          echo "Kernel repository"
-          echo "========================================"
-
+          echo "Kernel repository:"
           git remote -v
+          echo "Branch:"
           git branch --show-current
+          echo "Commit:"
           git rev-parse HEAD
-
-      # ============================================================
-      # Clone the clang version used by the known-good build
-      # ============================================================
 
       - name: Clone clang-r416183b
         run: |
+          set -e
+
           git clone \
             --depth=1 \
             --single-branch \
@@ -86,15 +73,7 @@ jobs:
             "https://github.com/${CLANG_REPO}.git" \
             "${CLANG_DIR}"
 
-          echo "========================================"
-          echo "Clang"
-          echo "========================================"
-
           "${CLANG_DIR}/bin/clang" --version
-
-      # ============================================================
-      # Verify the source tree before modifying it
-      # ============================================================
 
       - name: Verify LineageOS kernel tree
         working-directory: kernel
@@ -139,44 +118,93 @@ jobs:
             'SYSCALL_DEFINE4(reboot)' \
             kernel/reboot.c
 
-      # ============================================================
-      # Install ReSukiSU into the kernel
-      # ============================================================
-
-      - name: Setup ReSukiSU
+      - name: Install ReSukiSU
         working-directory: kernel
         run: |
-          set -e
+          set -euxo pipefail
 
-          curl -LSs \
-            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
-            -o /tmp/resukisu-setup.sh
-
-          chmod +x /tmp/resukisu-setup.sh
-
-          /tmp/resukisu-setup.sh
-
-          echo
           echo "========================================"
-          echo "Verifying ReSukiSU installation"
+          echo "Cloning ReSukiSU"
           echo "========================================"
+
+          rm -rf KernelSU
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            https://github.com/ReSukiSU/ReSukiSU.git \
+            KernelSU
 
           test -d KernelSU
-          test -e drivers/kernelsu
-          test -f drivers/kernelsu/Kconfig
-
-          echo "[PASS] KernelSU directory exists"
-          echo "[PASS] drivers/kernelsu exists"
-          echo "[PASS] KernelSU Kconfig exists"
+          test -d KernelSU/kernel
 
           echo
-          ls -ld KernelSU drivers/kernelsu
+          echo "ReSukiSU commit:"
+          git -C KernelSU rev-parse HEAD
 
-      # ============================================================
-      # Enable ReSukiSU
-      # ============================================================
+          echo
+          echo "ReSukiSU repository:"
+          git -C KernelSU remote -v
 
-      - name: Add ReSukiSU configuration
+          if [ -d drivers ]; then
+            DRIVER_DIR="$PWD/drivers"
+          elif [ -d common/drivers ]; then
+            DRIVER_DIR="$PWD/common/drivers"
+          else
+            echo "[FAIL] No kernel drivers directory found"
+            exit 1
+          fi
+
+          echo
+          echo "Driver directory: $DRIVER_DIR"
+
+          rm -f "$DRIVER_DIR/kernelsu"
+
+          ln -s \
+            "$(realpath --relative-to="$DRIVER_DIR" "$PWD/KernelSU/kernel")" \
+            "$DRIVER_DIR/kernelsu"
+
+          test -L "$DRIVER_DIR/kernelsu"
+
+          echo
+          echo "KernelSU symlink:"
+          ls -l "$DRIVER_DIR/kernelsu"
+
+          if ! grep -qF 'obj-$(CONFIG_KSU) += kernelsu/' \
+              "$DRIVER_DIR/Makefile"; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
+              >> "$DRIVER_DIR/Makefile"
+          fi
+
+          if ! grep -qF 'source "drivers/kernelsu/Kconfig"' \
+              "$DRIVER_DIR/Kconfig"; then
+            sed -i \
+              '/endmenu/i source "drivers/kernelsu/Kconfig"' \
+              "$DRIVER_DIR/Kconfig"
+          fi
+
+          echo
+          echo "========================================"
+          echo "ReSukiSU integration verification"
+          echo "========================================"
+
+          grep -nF \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            "$DRIVER_DIR/Makefile"
+
+          grep -nF \
+            'source "drivers/kernelsu/Kconfig"' \
+            "$DRIVER_DIR/Kconfig"
+
+          test -f "$DRIVER_DIR/kernelsu/Makefile"
+          test -f "$DRIVER_DIR/kernelsu/Kconfig"
+
+          echo
+          echo "[PASS] ReSukiSU kernel directory installed"
+          echo "[PASS] drivers/Makefile integrated"
+          echo "[PASS] drivers/Kconfig integrated"
+
+      - name: Enable ReSukiSU configuration
         working-directory: kernel
         run: |
           set -e
@@ -195,15 +223,6 @@ jobs:
 
           grep '^CONFIG_KSU' "$CONFIG"
 
-      # ============================================================
-      # Apply the exact ReSukiSU 4.19 manual hooks
-      #
-      # IMPORTANT:
-      # We do not match giant whitespace-sensitive source blocks.
-      # Instead we locate the actual function declarations in the
-      # LineageOS tree and modify their bodies.
-      # ============================================================
-
       - name: Apply ReSukiSU manual hooks
         working-directory: kernel
         run: |
@@ -212,68 +231,57 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import re
+          import sys
 
-          ROOT = Path(".")
+          def die(message):
+              print(f"[FAIL] {message}")
+              sys.exit(1)
 
-          def read(path):
+          def load(path):
               return Path(path).read_text()
 
-          def write(path, text):
+          def save(path, text):
               Path(path).write_text(text)
 
-          def fail(message):
-              raise SystemExit("[FAIL] " + message)
-
-          def insert_before_function_body(text, signature_regex, insertion, name):
-              """
-              Find a function signature and insert text immediately after
-              its opening '{'.
-
-              This deliberately ignores whitespace differences.
-              """
-
+          def insert_after_opening_brace(
+              text,
+              function_regex,
+              code,
+              name
+          ):
               match = re.search(
-                  signature_regex + r'\s*\{',
+                  function_regex + r'\s*\{',
                   text,
                   re.MULTILINE
               )
 
               if not match:
-                  fail(f"{name}: function signature not found")
+                  die(f"{name}: function not found")
 
               brace = text.find("{", match.start(), match.end())
 
-              if brace == -1:
-                  fail(f"{name}: opening brace not found")
+              if brace < 0:
+                  die(f"{name}: opening brace not found")
 
-              if insertion.strip() in text:
-                  print(f"[OK] {name}: already present")
+              if code.strip() in text:
+                  print(f"[OK] {name}: already patched")
                   return text
 
-              return text[:brace + 1] + "\n" + insertion + text[brace + 1:]
-
-          def insert_after_marker(text, marker_regex, insertion, name):
-              if insertion.strip() in text:
-                  print(f"[OK] {name}: already present")
-                  return text
-
-              match = re.search(marker_regex, text, re.MULTILINE)
-
-              if not match:
-                  fail(f"{name}: anchor not found")
-
-              pos = match.end()
-
-              return text[:pos] + "\n" + insertion + text[pos:]
+              return (
+                  text[:brace + 1]
+                  + "\n"
+                  + code
+                  + text[brace + 1:]
+              )
 
           # ========================================================
           # fs/stat.c
           # ========================================================
 
-          path = Path("fs/stat.c")
-          text = read(path)
+          path = "fs/stat.c"
+          text = load(path)
 
-          stat_declarations = r"""
+          declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
           extern int ksu_handle_stat(
@@ -285,7 +293,8 @@ jobs:
               unsigned int *fd,
               struct stat __user **statbuf_ptr);
 
-          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          #if defined(__ARCH_WANT_STAT64) || \
+              defined(__ARCH_WANT_COMPAT_STAT64)
           extern void ksu_handle_fstat64_ret(
               unsigned long *fd,
               struct stat64 __user **statbuf_ptr);
@@ -293,30 +302,26 @@ jobs:
           #endif
           """
 
-          # Put declarations before the first newfstatat syscall.
-          if "ksu_handle_stat(" not in text:
-              match = re.search(
+          if "extern int ksu_handle_stat(" not in text:
+              anchor = re.search(
                   r'^SYSCALL_DEFINE4\(newfstatat,',
                   text,
                   re.MULTILINE
               )
 
-              if not match:
-                  fail("stat: newfstatat syscall not found")
+              if not anchor:
+                  die("stat: newfstatat syscall not found")
 
               text = (
-                  text[:match.start()]
-                  + stat_declarations.strip()
+                  text[:anchor.start()]
+                  + declarations.strip()
                   + "\n\n"
-                  + text[match.start():]
+                  + text[anchor.start():]
               )
 
               print("[OK] stat declarations inserted")
-          else:
-              print("[OK] stat declarations already present")
 
-          # newfstatat()
-          pattern = (
+          newfstatat = (
               r'SYSCALL_DEFINE4\(newfstatat,\s*'
               r'int,\s*dfd,\s*'
               r'const char __user \*,\s*filename,\s*'
@@ -324,112 +329,18 @@ jobs:
               r'int,\s*flag\)'
           )
 
-          hook = r"""
+          text = insert_after_opening_brace(
+              text,
+              newfstatat,
+              r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_stat(&dfd, &filename, &flag);
           #endif
-          """
-
-          if "ksu_handle_stat(&dfd, &filename, &flag)" not in text:
-              text = insert_before_function_body(
-                  text,
-                  pattern,
-                  hook,
-                  "stat/newfstatat"
-              )
-              print("[OK] stat/newfstatat hook inserted")
-
-          # newfstat()
-          pattern = (
-              r'SYSCALL_DEFINE2\(newfstat,\s*'
-              r'unsigned int,\s*fd,\s*'
-              r'struct stat __user \*,\s*statbuf\)'
+          """,
+              "stat/newfstatat"
           )
 
-          hook = r"""
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-              ksu_handle_newfstat_ret(&fd, &statbuf);
-          #endif
-          """
-
-          if "ksu_handle_newfstat_ret(&fd, &statbuf)" not in text:
-              # Insert immediately before the final return of newfstat.
-              match = re.search(
-                  pattern + r'\s*\{.*?\n\}',
-                  text,
-                  re.MULTILINE | re.DOTALL
-              )
-
-              if not match:
-                  fail("stat/newfstat: function not found")
-
-              body = match.group(0)
-
-              return_match = re.search(
-                  r'(\n\s*return\s+error;\s*\n)',
-                  body
-              )
-
-              if not return_match:
-                  fail("stat/newfstat: return error anchor not found")
-
-              body = (
-                  body[:return_match.start()]
-                  + "\n"
-                  + hook
-                  + body[return_match.start():]
-              )
-
-              text = text[:match.start()] + body + text[match.end():]
-
-              print("[OK] stat/newfstat hook inserted")
-
-          # fstat64()
-          pattern = (
-              r'SYSCALL_DEFINE2\(fstat64,\s*'
-              r'unsigned long,\s*fd,\s*'
-              r'struct stat64 __user \*,\s*statbuf\)'
-          )
-
-          hook = r"""
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-              ksu_handle_fstat64_ret(&fd, &statbuf);
-          #endif
-          """
-
-          if "ksu_handle_fstat64_ret(&fd, &statbuf)" not in text:
-              match = re.search(
-                  pattern + r'\s*\{.*?\n\}',
-                  text,
-                  re.MULTILINE | re.DOTALL
-              )
-
-              if not match:
-                  fail("stat/fstat64: function not found")
-
-              body = match.group(0)
-
-              return_match = re.search(
-                  r'(\n\s*return\s+error;\s*\n)',
-                  body
-              )
-
-              if not return_match:
-                  fail("stat/fstat64: return error anchor not found")
-
-              body = (
-                  body[:return_match.start()]
-                  + "\n"
-                  + hook
-                  + body[return_match.start():]
-              )
-
-              text = text[:match.start()] + body + text[match.end():]
-
-              print("[OK] stat/fstat64 hook inserted")
-
-          # fstatat64()
-          pattern = (
+          fstatat64 = (
               r'SYSCALL_DEFINE4\(fstatat64,\s*'
               r'int,\s*dfd,\s*'
               r'const char __user \*,\s*filename,\s*'
@@ -437,67 +348,125 @@ jobs:
               r'int,\s*flag\)'
           )
 
-          if "ksu_handle_stat(&dfd, &filename, &flag)" not in text:
-              # It should already have been added to newfstatat, so use
-              # a function-specific regex here.
-              match = re.search(
-                  pattern + r'\s*\{',
+          match = re.search(
+              fstatat64 + r'\s*\{.*?\n\}',
+              text,
+              re.MULTILINE | re.DOTALL
+          )
+
+          if not match:
+              die("stat: fstatat64 syscall not found")
+
+          if "ksu_handle_stat(&dfd, &filename, &flag)" not in match.group(0):
+              text = insert_after_opening_brace(
                   text,
-                  re.MULTILINE
+                  fstatat64,
+                  r"""
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+          """,
+                  "stat/fstatat64"
               )
 
-              if not match:
-                  fail("stat/fstatat64: function not found")
+          newfstat = (
+              r'SYSCALL_DEFINE2\(newfstat,\s*'
+              r'unsigned int,\s*fd,\s*'
+              r'struct stat __user \*,\s*statbuf\)'
+          )
 
-              brace = text.find("{", match.start(), match.end())
+          match = re.search(
+              newfstat + r'\s*\{.*?\n\}',
+              text,
+              re.MULTILINE | re.DOTALL
+          )
 
-              text = (
-                  text[:brace + 1]
+          if not match:
+              die("stat: newfstat function not found")
+
+          body = match.group(0)
+
+          if "ksu_handle_newfstat_ret(&fd, &statbuf)" not in body:
+              return_match = re.search(
+                  r'(\n\s*return\s+error;)',
+                  body
+              )
+
+              if not return_match:
+                  die("stat: newfstat return anchor not found")
+
+              hook = r"""
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+              """
+
+              body = (
+                  body[:return_match.start()]
                   + "\n"
                   + hook
-                  + text[brace + 1:]
+                  + body[return_match.start():]
               )
 
-              print("[OK] stat/fstatat64 hook inserted")
-          else:
-              # If the generic call already exists, determine whether
-              # fstatat64 actually contains it.
-              match = re.search(
-                  pattern + r'\s*\{.*?\n\}',
-                  text,
-                  re.MULTILINE | re.DOTALL
+              text = (
+                  text[:match.start()]
+                  + body
+                  + text[match.end():]
               )
 
-              if not match:
-                  fail("stat/fstatat64: function not found")
+          fstat64 = (
+              r'SYSCALL_DEFINE2\(fstat64,\s*'
+              r'unsigned long,\s*fd,\s*'
+              r'struct stat64 __user \*,\s*statbuf\)'
+          )
 
-              if "ksu_handle_stat(&dfd, &filename, &flag)" not in match.group(0):
-                  brace = text.find("{", match.start(), match.end())
-                  text = (
-                      text[:brace + 1]
-                      + "\n"
-                      + hook
-                      + text[brace + 1:]
-                  )
+          match = re.search(
+              fstat64 + r'\s*\{.*?\n\}',
+              text,
+              re.MULTILINE | re.DOTALL
+          )
 
-                  print("[OK] stat/fstatat64 hook inserted")
+          if not match:
+              die("stat: fstat64 function not found")
 
-          write(path, text)
+          body = match.group(0)
+
+          if "ksu_handle_fstat64_ret(&fd, &statbuf)" not in body:
+              return_match = re.search(
+                  r'(\n\s*return\s+error;)',
+                  body
+              )
+
+              if not return_match:
+                  die("stat: fstat64 return anchor not found")
+
+              hook = r"""
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_fstat64_ret(&fd, &statbuf);
+          #endif
+              """
+
+              body = (
+                  body[:return_match.start()]
+                  + "\n"
+                  + hook
+                  + body[return_match.start():]
+              )
+
+              text = (
+                  text[:match.start()]
+                  + body
+                  + text[match.end():]
+              )
+
+          save(path, text)
 
           # ========================================================
           # fs/exec.c
-          #
-          # Current ReSukiSU API:
-          #
-          # ksu_handle_execveat()
-          # ksu_handle_post_execveat()
-          #
-          # For this 4.19 tree, the primary required hook is
-          # do_execveat_common().
           # ========================================================
 
-          path = Path("fs/exec.c")
-          text = read(path)
+          path = "fs/exec.c"
+          text = load(path)
 
           exec_declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
@@ -520,28 +489,24 @@ jobs:
           #endif
           """
 
-          if "ksu_handle_execveat(" not in text:
-              marker = re.search(
+          if "extern int ksu_handle_execveat(" not in text:
+              anchor = re.search(
                   r'^static int do_execveat_common\(',
                   text,
                   re.MULTILINE
               )
 
-              if not marker:
-                  fail("exec: do_execveat_common not found")
+              if not anchor:
+                  die("exec: do_execveat_common not found")
 
               text = (
-                  text[:marker.start()]
+                  text[:anchor.start()]
                   + exec_declarations.strip()
                   + "\n\n"
-                  + text[marker.start():]
+                  + text[anchor.start():]
               )
 
-              print("[OK] exec declarations inserted")
-          else:
-              print("[OK] exec declarations already present")
-
-          pattern = (
+          common = (
               r'static int do_execveat_common\('
               r'\s*int fd,\s*'
               r'struct filename \*filename,\s*'
@@ -550,30 +515,30 @@ jobs:
               r'int flags\)'
           )
 
-          if "ksu_handle_post_execveat(" not in text:
-              match = re.search(
-                  pattern + r'\s*\{.*?\n\}',
-                  text,
-                  re.MULTILINE | re.DOTALL
-              )
+          match = re.search(
+              common + r'\s*\{.*?\n\}',
+              text,
+              re.MULTILINE | re.DOTALL
+          )
 
-              if not match:
-                  fail("exec: do_execveat_common body not found")
+          if not match:
+              die("exec: do_execveat_common body not found")
 
-              body = match.group(0)
+          body = match.group(0)
 
+          if "ksu_handle_post_execveat(" not in body:
               old = (
                   "return __do_execve_file("
                   "fd, filename, argv, envp, flags, NULL);"
               )
 
               if old not in body:
-                  fail(
+                  die(
                       "exec: expected __do_execve_file() "
-                      "call not found in do_execveat_common"
+                      "return statement not found"
                   )
 
-              replacement = r"""
+              new = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
               int retval;
 
@@ -602,10 +567,16 @@ jobs:
 
               return retval;
           #else
-          """ + "\n              " + old + r"""
-          #endif"""
+              return __do_execve_file(
+                  fd, filename, argv, envp, flags, NULL);
+          #endif
+              """
 
-              body = body.replace(old, replacement, 1)
+              body = body.replace(
+                  old,
+                  new.strip(),
+                  1
+              )
 
               text = (
                   text[:match.start()]
@@ -613,97 +584,26 @@ jobs:
                   + text[match.end():]
               )
 
-              print("[OK] exec/do_execveat_common hooks inserted")
-          else:
-              print("[OK] exec hooks already present")
+          save(path, text)
 
-          # 32-bit compatibility:
-          # ReSukiSU's documentation specifically calls out
-          # do_execve/compat_do_execve for 32-bit su and 32-on-64.
-          #
-          # This SM6115 kernel has CONFIG_COMPAT=y.
-          # Add the deprecated compatibility hook exactly where
-          # supported, but don't modify the primary common hook.
+          # ========================================================
+          # fs/open.c
+          # ========================================================
 
-          compat_pattern = (
-              r'static int compat_do_execve\('
-              r'\s*struct filename \*filename,\s*'
-              r'const char __user \*const __user \*__argv,\s*'
-              r'const char __user \*const __user \*__envp\)'
-          )
+          path = "fs/open.c"
+          text = load(path)
 
-          if "ksu_handle_execveat((int *)AT_FDCWD" not in text:
-              match = re.search(
-                  compat_pattern + r'\s*\{.*?\n\}',
+          if "extern int ksu_handle_faccessat(" not in text:
+              anchor = re.search(
+                  r'^SYSCALL_DEFINE3\(faccessat,',
                   text,
-                  re.MULTILINE | re.DOTALL
+                  re.MULTILINE
               )
 
-              if match:
-                  body = match.group(0)
+              if not anchor:
+                  die("open: faccessat not found")
 
-                  marker = (
-                      "return do_execveat_common("
-                      "AT_FDCWD, filename, argv, envp, 0);"
-                  )
-
-                  if marker in body:
-                      replacement = r"""
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-              int retval;
-
-              ksu_handle_execveat(
-                  (int *)AT_FDCWD,
-                  &filename,
-                  &argv,
-                  &envp,
-                  0);
-
-              retval = do_execveat_common(
-                  AT_FDCWD,
-                  filename,
-                  argv,
-                  envp,
-                  0);
-
-              ksu_handle_post_execveat(
-                  (int *)AT_FDCWD,
-                  &filename,
-                  &argv,
-                  &envp,
-                  0,
-                  &retval);
-
-              return retval;
-          #else
-          """ + "\n              " + marker + r"""
-          #endif"""
-
-                      body = body.replace(marker, replacement, 1)
-
-                      text = (
-                          text[:match.start()]
-                          + body
-                          + text[match.end():]
-                      )
-
-                      print("[OK] exec/compat_do_execve compatibility hook inserted")
-              else:
-                  print(
-                      "[INFO] compat_do_execve signature differs; "
-                      "primary do_execveat_common hook remains active"
-                  )
-
-          write(path, text)
-
-          # ========================================================
-          # fs/open.c — faccessat
-          # ========================================================
-
-          path = Path("fs/open.c")
-          text = read(path)
-
-          access_declaration = r"""
+              declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
           extern int ksu_handle_faccessat(
@@ -712,60 +612,57 @@ jobs:
               int *mode,
               int *flags);
           #endif
-          """
-
-          if "ksu_handle_faccessat(" not in text:
-              marker = re.search(
-                  r'^SYSCALL_DEFINE3\(faccessat,',
-                  text,
-                  re.MULTILINE
-              )
-
-              if not marker:
-                  fail("open: faccessat syscall not found")
+              """
 
               text = (
-                  text[:marker.start()]
-                  + access_declaration.strip()
+                  text[:anchor.start()]
+                  + declarations.strip()
                   + "\n\n"
-                  + text[marker.start():]
+                  + text[anchor.start():]
               )
 
-              print("[OK] faccessat declaration inserted")
-
-          pattern = (
+          faccessat = (
               r'SYSCALL_DEFINE3\(faccessat,\s*'
               r'int,\s*dfd,\s*'
               r'const char __user \*,\s*filename,\s*'
               r'int,\s*mode\)'
           )
 
-          if "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)" not in text:
-              text = insert_before_function_body(
-                  text,
-                  pattern,
-                  r"""
+          text = insert_after_opening_brace(
+              text,
+              faccessat,
+              r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
-              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+              ksu_handle_faccessat(
+                  &dfd,
+                  &filename,
+                  &mode,
+                  NULL);
           #endif
           """,
-                  "open/faccessat"
+              "open/faccessat"
+          )
+
+          save(path, text)
+
+          # ========================================================
+          # fs/read_write.c
+          # ========================================================
+
+          path = "fs/read_write.c"
+          text = load(path)
+
+          if "ksu_handle_sys_read(" not in text:
+              anchor = re.search(
+                  r'^SYSCALL_DEFINE3\(read,',
+                  text,
+                  re.MULTILINE
               )
 
-              print("[OK] open/faccessat hook inserted")
+              if not anchor:
+                  die("read: read syscall not found")
 
-          write(path, text)
-
-          # ========================================================
-          # fs/read_write.c — read()
-          #
-          # This is the correct 4.19 hook. Do NOT hook ksys_read().
-          # ========================================================
-
-          path = Path("fs/read_write.c")
-          text = read(path)
-
-          read_declaration = r"""
+              declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
           extern bool ksu_init_rc_hook __read_mostly;
 
@@ -774,59 +671,54 @@ jobs:
               char __user **buf_ptr,
               size_t *count_ptr);
           #endif
-          """
-
-          if "ksu_handle_sys_read(" not in text:
-              marker = re.search(
-                  r'^SYSCALL_DEFINE3\(read,',
-                  text,
-                  re.MULTILINE
-              )
-
-              if not marker:
-                  fail("read: read syscall not found")
+              """
 
               text = (
-                  text[:marker.start()]
-                  + read_declaration.strip()
+                  text[:anchor.start()]
+                  + declarations.strip()
                   + "\n\n"
-                  + text[marker.start():]
+                  + text[anchor.start():]
               )
 
-              print("[OK] read declaration inserted")
-
-          pattern = (
+          read_function = (
               r'SYSCALL_DEFINE3\(read,\s*'
               r'unsigned int,\s*fd,\s*'
               r'char __user \*,\s*buf,\s*'
               r'size_t,\s*count\)'
           )
 
-          if "ksu_handle_sys_read(fd, &buf, &count)" not in text:
-              text = insert_before_function_body(
-                  text,
-                  pattern,
-                  r"""
+          text = insert_after_opening_brace(
+              text,
+              read_function,
+              r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
               if (unlikely(ksu_init_rc_hook))
                   ksu_handle_sys_read(fd, &buf, &count);
           #endif
           """,
-                  "read"
+              "read"
+          )
+
+          save(path, text)
+
+          # ========================================================
+          # kernel/reboot.c
+          # ========================================================
+
+          path = "kernel/reboot.c"
+          text = load(path)
+
+          if "extern int ksu_handle_sys_reboot(" not in text:
+              anchor = re.search(
+                  r'^SYSCALL_DEFINE4\(reboot,',
+                  text,
+                  re.MULTILINE
               )
 
-              print("[OK] read hook inserted")
+              if not anchor:
+                  die("reboot: reboot syscall not found")
 
-          write(path, text)
-
-          # ========================================================
-          # kernel/reboot.c — reboot()
-          # ========================================================
-
-          path = Path("kernel/reboot.c")
-          text = read(path)
-
-          reboot_declaration = r"""
+              declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
           extern int ksu_handle_sys_reboot(
               int magic1,
@@ -834,28 +726,16 @@ jobs:
               unsigned int cmd,
               void __user **arg);
           #endif
-          """
-
-          if "ksu_handle_sys_reboot(" not in text:
-              marker = re.search(
-                  r'^SYSCALL_DEFINE4\(reboot,',
-                  text,
-                  re.MULTILINE
-              )
-
-              if not marker:
-                  fail("reboot: reboot syscall not found")
+              """
 
               text = (
-                  text[:marker.start()]
-                  + reboot_declaration.strip()
+                  text[:anchor.start()]
+                  + declarations.strip()
                   + "\n\n"
-                  + text[marker.start():]
+                  + text[anchor.start():]
               )
 
-              print("[OK] reboot declaration inserted")
-
-          pattern = (
+          reboot = (
               r'SYSCALL_DEFINE4\(reboot,\s*'
               r'int,\s*magic1,\s*'
               r'int,\s*magic2,\s*'
@@ -863,25 +743,31 @@ jobs:
               r'void __user \*,\s*arg\)'
           )
 
-          if "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)" not in text:
-              text = insert_before_function_body(
-                  text,
-                  pattern,
-                  r"""
+          text = insert_after_opening_brace(
+              text,
+              reboot,
+              r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
-              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+              ksu_handle_sys_reboot(
+                  magic1,
+                  magic2,
+                  cmd,
+                  &arg);
           #endif
           """,
-                  "reboot"
-              )
+              "reboot"
+          )
 
-              print("[OK] reboot hook inserted")
-
-          write(path, text)
+          save(path, text)
 
           # ========================================================
-          # Final source verification
+          # Verification
           # ========================================================
+
+          print()
+          print("========================================")
+          print("Final hook verification")
+          print("========================================")
 
           checks = {
               "fs/stat.c": [
@@ -889,56 +775,45 @@ jobs:
                   "ksu_handle_newfstat_ret(&fd, &statbuf)",
                   "ksu_handle_fstat64_ret(&fd, &statbuf)",
               ],
-
               "fs/exec.c": [
                   "ksu_handle_execveat(",
                   "ksu_handle_post_execveat(",
               ],
-
               "fs/open.c": [
-                  "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)",
+                  "ksu_handle_faccessat(",
               ],
-
               "fs/read_write.c": [
                   "ksu_init_rc_hook",
                   "ksu_handle_sys_read(fd, &buf, &count)",
               ],
-
               "kernel/reboot.c": [
-                  "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)",
+                  "ksu_handle_sys_reboot(",
               ],
           }
 
-          print()
-          print("========================================")
-          print("Final hook verification")
-          print("========================================")
-
           for filename, needles in checks.items():
-              data = read(filename)
+              data = load(filename)
 
               for needle in needles:
                   if needle not in data:
-                      fail(
-                          f"verification: {needle!r} "
-                          f"missing from {filename}"
+                      die(
+                          f"{filename}: missing required hook: "
+                          f"{needle}"
                       )
 
               print(f"[PASS] {filename}")
 
           print()
-          print("[PASS] All required ReSukiSU manual hooks are present.")
+          print("[PASS] All required ReSukiSU hooks are present.")
           PY
-
-      # ============================================================
-      # Show resulting patches
-      # ============================================================
 
       - name: Show ReSukiSU modifications
         working-directory: kernel
         run: |
+          set -e
+
           echo "========================================"
-          echo "ReSukiSU config"
+          echo "ReSukiSU configuration"
           echo "========================================"
 
           grep '^CONFIG_KSU' \
@@ -958,38 +833,19 @@ jobs:
             fs/read_write.c \
             kernel/reboot.c
 
-      # ============================================================
-      # Configure kernel
-      # ============================================================
-
       - name: Configure kernel
         working-directory: kernel
         env:
           PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
-
         run: |
           set -e
 
           export ARCH=arm64
           export SUBARCH=arm64
-
           export LLVM=1
           export LLVM_IAS=1
-
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-          echo "========================================"
-          echo "Compiler"
-          echo "========================================"
-
-          clang --version
-          ld.lld --version
-
-          echo
-          echo "========================================"
-          echo "Generating bengal-perf configuration"
-          echo "========================================"
 
           make \
             O="${OUT_DIR}" \
@@ -997,11 +853,6 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
-
-          echo
-          echo "========================================"
-          echo "Merging GTA4L configuration"
-          echo "========================================"
 
           scripts/kconfig/merge_config.sh \
             -m \
@@ -1016,46 +867,33 @@ jobs:
             olddefconfig
 
           echo
-          echo "========================================"
-          echo "Final KSU configuration"
-          echo "========================================"
-
+          echo "Final KSU configuration:"
           grep '^CONFIG_KSU' "${OUT_DIR}/.config"
 
-          grep -qxF 'CONFIG_KSU=y' \
+          grep -qxF \
+            'CONFIG_KSU=y' \
             "${OUT_DIR}/.config"
 
-          grep -qxF 'CONFIG_KSU_MANUAL_HOOK=y' \
+          grep -qxF \
+            'CONFIG_KSU_MANUAL_HOOK=y' \
             "${OUT_DIR}/.config"
 
-          echo
           echo "[PASS] CONFIG_KSU=y"
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
-
-      # ============================================================
-      # Build
-      # ============================================================
 
       - name: Build kernel
         working-directory: kernel
         env:
           PATH: ${{ env.CLANG_DIR }}/bin:${{ env.PATH }}
-
         run: |
           set -e
 
           export ARCH=arm64
           export SUBARCH=arm64
-
           export LLVM=1
           export LLVM_IAS=1
-
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-          echo "========================================"
-          echo "Building Image + Image.gz"
-          echo "========================================"
 
           make \
             O="${OUT_DIR}" \
@@ -1065,10 +903,6 @@ jobs:
             -j"$(nproc)" \
             Image \
             Image.gz
-
-      # ============================================================
-      # Verify final kernel
-      # ============================================================
 
       - name: Verify kernel
         run: |
@@ -1093,13 +927,8 @@ jobs:
             "${OUT_DIR}/vmlinux" \
             "${OUT_DIR}/System.map"
 
-          echo
           file "$IMAGE"
           file "$IMAGE_GZ"
-
-      # ============================================================
-      # Package
-      # ============================================================
 
       - name: Package kernel
         run: |
@@ -1138,6 +967,7 @@ jobs:
           cat > kernel-artifact/BUILD_INFO.txt <<EOF
           Device: Samsung Galaxy Tab A7 SM-T505
           Codename: gta4l
+          Kernel: 4.19.325
           Kernel repository: ${KERNEL_REPO}
           Kernel branch: ${KERNEL_BRANCH}
           Kernel commit: $(cd "${KERNEL_DIR}" && git rev-parse HEAD)
@@ -1150,12 +980,6 @@ jobs:
           tar -czf \
             resukisu-sm6115-kernel.tar.gz \
             -C kernel-artifact .
-
-          ls -lh resukisu-sm6115-kernel.tar.gz
-
-      # ============================================================
-      # Upload
-      # ============================================================
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
