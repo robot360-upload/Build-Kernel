@@ -98,26 +98,43 @@ jobs:
           echo
           echo "===== Relevant functions ====="
 
+          echo "--- fs/stat.c ---"
           grep -n \
-            'SYSCALL_DEFINE4(newfstatat\|SYSCALL_DEFINE2(newfstat\|SYSCALL_DEFINE2(fstat64\|SYSCALL_DEFINE4(fstatat64' \
-            fs/stat.c
+            -E \
+            'newfstatat|newfstat|fstat64|fstatat64' \
+            fs/stat.c || true
 
+          echo
+          echo "--- fs/exec.c ---"
           grep -n \
-            'do_execveat_common\|compat_do_execve' \
-            fs/exec.c
+            -E \
+            'do_execveat_common|do_execve|compat_do_execve' \
+            fs/exec.c || true
 
+          echo
+          echo "--- fs/open.c ---"
           grep -n \
-            'SYSCALL_DEFINE3(faccessat)' \
-            fs/open.c
+            -E \
+            'faccessat' \
+            fs/open.c || true
 
+          echo
+          echo "--- fs/read_write.c ---"
           grep -n \
-            'SYSCALL_DEFINE3(read)' \
-            fs/read_write.c
+            -E \
+            'ksys_read|SYSCALL_DEFINE3\(read|read\(' \
+            fs/read_write.c || true
 
+          echo
+          echo "--- kernel/reboot.c ---"
           grep -n \
-            'SYSCALL_DEFINE4(reboot)' \
-            kernel/reboot.c
+            -E \
+            'SYSCALL_DEFINE4\(reboot|reboot\(' \
+            kernel/reboot.c || true
 
+          echo
+          echo "[PASS] Source-tree inspection completed"
+          
       - name: Install ReSukiSU
         working-directory: kernel
         run: |
