@@ -306,6 +306,32 @@ jobs:
       # as being defined twice.
       # ============================================================
 
+      - name: Inspect ReSukiSU Kconfig
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "ReSukiSU Kconfig"
+          echo "========================================"
+
+          grep -n -A80 -B20 \
+            -E 'KSU_MANUAL_HOOK|KSU_TRACEPOINT_HOOK|choice' \
+            KernelSU/kernel/Kconfig || true
+
+      - name: Inspect ReSukiSU Kconfig
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "ReSukiSU Kconfig"
+          echo "========================================"
+
+          grep -n -A80 -B20 \
+            -E 'KSU_MANUAL_HOOK|KSU_TRACEPOINT_HOOK|choice' \
+            KernelSU/kernel/Kconfig || true
+            
       - name: Prepare GTA4L configuration
         working-directory: kernel
         run: |
