@@ -24,21 +24,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            git \
+            make \
             bc \
             bison \
-            build-essential \
-            ccache \
-            curl \
             flex \
-            gawk \
-            git \
-            libelf-dev \
-            libssl-dev \
+            build-essential \
+            clang \
             lld \
-            python3 \
+            llvm \
+            libssl-dev \
+            libelf-dev \
+            libdw-dev \
+            cpio \
             rsync \
+            python3 \
+            python3-pip \
             unzip \
             zip \
+            curl \
+            wget \
+            ca-certificates \
+            device-tree-compiler \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
