@@ -889,6 +889,9 @@ jobs:
           echo
           ld.lld --version
 
+          echo
+          echo "===== Base defconfig ====="
+
           make \
             O="${OUT_DIR}" \
             ARCH=arm64 \
@@ -896,10 +899,30 @@ jobs:
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
+          echo
+          echo "===== Merge GTA4L configuration ====="
+
           scripts/kconfig/merge_config.sh \
             -m \
             "${OUT_DIR}/.config" \
             arch/arm64/configs/vendor/gta4l-common.config
+
+          echo
+          echo "===== Select ReSukiSU manual hook ====="
+
+          "${OUT_DIR}/scripts/config" \
+            --file "${OUT_DIR}/.config" \
+            --enable CONFIG_KSU
+
+          "${OUT_DIR}/scripts/config" \
+            --file "${OUT_DIR}/.config" \
+            --disable CONFIG_KSU_TRACEPOINT_HOOK
+
+          "${OUT_DIR}/scripts/config" \
+            --enable CONFIG_KSU_MANUAL_HOOK
+
+          echo
+          echo "===== Resolve configuration ====="
 
           make \
             O="${OUT_DIR}" \
@@ -909,19 +932,39 @@ jobs:
             olddefconfig
 
           echo
-          echo "Final KSU configuration:"
-          grep '^CONFIG_KSU' "${OUT_DIR}/.config"
+          echo "===== Final KSU configuration ====="
 
-          grep -qxF \
-            'CONFIG_KSU=y' \
+          grep '^CONFIG_KSU=' \
             "${OUT_DIR}/.config"
 
-          grep -qxF \
-            'CONFIG_KSU_MANUAL_HOOK=y' \
+          grep '^CONFIG_KSU_MANUAL_HOOK=' \
             "${OUT_DIR}/.config"
 
+          grep '^CONFIG_KSU_TRACEPOINT_HOOK=' \
+            "${OUT_DIR}/.config" || true
+
+          echo
+          echo "===== All KSU options ====="
+
+          grep '^CONFIG_KSU' \
+            "${OUT_DIR}/.config" || true
+
+          echo
+          echo "===== Required configuration check ====="
+
+          test "$(sed -n 's/^CONFIG_KSU=//p' "${OUT_DIR}/.config")" = "y"
+
+          test "$(sed -n 's/^CONFIG_KSU_MANUAL_HOOK=//p' "${OUT_DIR}/.config")" = "y"
+
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y' "${OUT_DIR}/.config"; then
+              echo "[FAIL] Tracepoint hook is still selected"
+              exit 1
+          fi
+
+          echo
           echo "[PASS] CONFIG_KSU=y"
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
+          echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK is disabled"
 
       - name: Build kernel
         working-directory: kernel
