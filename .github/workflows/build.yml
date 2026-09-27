@@ -49,6 +49,10 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
+          echo "===== Checking make ====="
+          command -v make
+          make --version
+
       - name: Clone LineageOS SM6115 kernel
         run: |
           set -e
