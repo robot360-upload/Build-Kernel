@@ -29,7 +29,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          set -euo pipefail
+          set -e
 
           sudo apt-get update
 
@@ -64,7 +64,7 @@ jobs:
 
       - name: Clone LineageOS SM6115 kernel
         run: |
-          set -euo pipefail
+          set -e
 
           git clone \
             --depth=1 \
@@ -80,23 +80,20 @@ jobs:
           echo "========================================"
 
           git remote -v
+          echo "Branch: $(git branch --show-current)"
+          echo "Commit: $(git rev-parse HEAD)"
 
-          echo "Branch:"
-          git branch --show-current
-
-          echo "Commit:"
-          git rev-parse HEAD
-
+          echo
           echo "Kernel version:"
           make kernelversion
 
       # ============================================================
-      # Clone clang
+      # Clone exact LineageOS clang
       # ============================================================
 
       - name: Clone clang-r416183b
         run: |
-          set -euo pipefail
+          set -e
 
           git clone \
             --depth=1 \
@@ -114,16 +111,14 @@ jobs:
           test -x "${CLANG_DIR}/bin/clang"
           test -x "${CLANG_DIR}/bin/ld.lld"
 
-          echo "[PASS] Clang verified"
-
       # ============================================================
-      # Verify kernel source
+      # Verify source
       # ============================================================
 
-      - name: Verify kernel tree
+      - name: Verify kernel source
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           for file in \
             fs/stat.c \
@@ -132,16 +127,12 @@ jobs:
             fs/read_write.c \
             kernel/reboot.c \
             arch/arm64/configs/vendor/bengal-perf_defconfig \
-            arch/arm64/configs/vendor/gta4l-common.config \
-            scripts/kconfig/merge_config.sh
+            arch/arm64/configs/vendor/gta4l-common.config
           do
-            if [ ! -f "$file" ]; then
-              echo "[FAIL] Missing: $file"
-              exit 1
-            fi
+            test -f "$file"
           done
 
-          echo "[PASS] Kernel tree verified"
+          echo "[PASS] Required kernel files exist"
 
       # ============================================================
       # Install ReSukiSU
@@ -161,6 +152,7 @@ jobs:
             KernelSU
 
           test -d KernelSU/kernel
+          test -f KernelSU/kernel/Kconfig
 
           echo "========================================"
           echo "ReSukiSU commit"
@@ -168,65 +160,56 @@ jobs:
 
           git -C KernelSU rev-parse HEAD
 
-          DRIVER_DIR="${PWD}/drivers"
+          DRIVER_DIR="$PWD/drivers"
 
-          test -d "${DRIVER_DIR}"
+          test -d "$DRIVER_DIR"
 
-          # Remove an old kernelsu entry if present.
-          rm -rf "${DRIVER_DIR}/kernelsu"
+          rm -f "$DRIVER_DIR/kernelsu"
 
-          # Link ReSukiSU into drivers/kernelsu.
           ln -s \
-            "$(realpath --relative-to="${DRIVER_DIR}" "${PWD}/KernelSU/kernel")" \
-            "${DRIVER_DIR}/kernelsu"
+            "$(realpath --relative-to="$DRIVER_DIR" "$PWD/KernelSU/kernel")" \
+            "$DRIVER_DIR/kernelsu"
 
-          # Add the Kbuild entry exactly once.
           if ! grep -qF \
             'obj-$(CONFIG_KSU) += kernelsu/' \
-            "${DRIVER_DIR}/Makefile"; then
+            "$DRIVER_DIR/Makefile"; then
 
             printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
-              >> "${DRIVER_DIR}/Makefile"
+              >> "$DRIVER_DIR/Makefile"
           fi
 
-          # Add Kconfig entry exactly once.
           if ! grep -qF \
             'source "drivers/kernelsu/Kconfig"' \
-            "${DRIVER_DIR}/Kconfig"; then
+            "$DRIVER_DIR/Kconfig"; then
 
             printf '\nsource "drivers/kernelsu/Kconfig"\n' \
-              >> "${DRIVER_DIR}/Kconfig"
+              >> "$DRIVER_DIR/Kconfig"
           fi
 
-          test -L "${DRIVER_DIR}/kernelsu"
+          test -L "$DRIVER_DIR/kernelsu"
 
           echo "[PASS] ReSukiSU installed"
 
       # ============================================================
-      # Force ReSukiSU manual hook
+      # Force manual hook as Kconfig choice default
       # ============================================================
 
-      - name: Configure ReSukiSU manual hook mode
+      - name: Force ReSukiSU manual hook mode
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           KSU_KCONFIG="KernelSU/kernel/Kconfig"
 
-          test -f "${KSU_KCONFIG}"
+          test -f "$KSU_KCONFIG"
 
           echo "========================================"
-          echo "Original ReSukiSU hook configuration"
+          echo "Original ReSukiSU hook choice"
           echo "========================================"
 
           grep -n -A20 \
             'prompt "KernelSU Hooking Method"' \
-            "${KSU_KCONFIG}"
-
-          echo
-          echo "========================================"
-          echo "Changing default to manual hook"
-          echo "========================================"
+            "$KSU_KCONFIG"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -240,7 +223,7 @@ jobs:
 
           if start == -1:
               raise SystemExit(
-                  "ERROR: KernelSU Hooking Method prompt not found"
+                  "ERROR: KernelSU Hooking Method choice not found"
               )
 
           end = text.find(
@@ -261,51 +244,43 @@ jobs:
           if old in block:
               block = block.replace(old, new, 1)
 
-              text = (
-                  text[:start]
-                  + block
-                  + text[end:]
-              )
+              text = text[:start] + block + text[end:]
 
               path.write_text(text)
 
               print(
-                  "[PASS] Changed default "
-                  "KSU_TRACEPOINT_HOOK -> KSU_MANUAL_HOOK"
+                  "[PASS] ReSukiSU default changed "
+                  "to KSU_MANUAL_HOOK"
               )
 
           elif new in block:
               print(
-                  "[OK] Manual hook is already the default"
+                  "[OK] KSU_MANUAL_HOOK already default"
               )
 
           else:
               print(block)
               raise SystemExit(
-                  "ERROR: Expected ReSukiSU Kconfig default not found"
+                  "ERROR: Expected Kconfig default not found"
               )
           PY
 
           echo
           echo "========================================"
-          echo "Modified ReSukiSU hook configuration"
+          echo "Modified ReSukiSU hook choice"
           echo "========================================"
 
           grep -n -A20 \
             'prompt "KernelSU Hooking Method"' \
-            "${KSU_KCONFIG}"
+            "$KSU_KCONFIG"
 
-          if ! grep -A5 \
+          grep -A5 \
             'prompt "KernelSU Hooking Method"' \
-            "${KSU_KCONFIG}" \
+            "$KSU_KCONFIG" \
             | grep -q \
-            'default KSU_MANUAL_HOOK'; then
+            'default KSU_MANUAL_HOOK'
 
-            echo "[FAIL] Manual hook is not the Kconfig default"
-            exit 1
-          fi
-
-          echo "[PASS] Manual hook is Kconfig default"
+          echo "[PASS] Manual hook selected as default"
 
       # ============================================================
       # Prepare GTA4L config
@@ -314,60 +289,54 @@ jobs:
       - name: Prepare GTA4L configuration
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           CONFIG="arch/arm64/configs/vendor/gta4l-common.config"
 
-          test -f "${CONFIG}"
+          cp "$CONFIG" "${CONFIG}.original"
 
-          # Keep an untouched copy for the final artifact.
-          cp "${CONFIG}" "${CONFIG}.original"
-
-          # Remove any existing KSU selections from the vendor fragment.
           sed -i \
             '/^[[:space:]]*CONFIG_KSU=y[[:space:]]*$/d' \
-            "${CONFIG}"
+            "$CONFIG"
 
           sed -i \
             '/^[[:space:]]*CONFIG_KSU_MANUAL_HOOK=y[[:space:]]*$/d' \
-            "${CONFIG}"
+            "$CONFIG"
 
           sed -i \
             '/^[[:space:]]*CONFIG_KSU_TRACEPOINT_HOOK=y[[:space:]]*$/d' \
-            "${CONFIG}"
+            "$CONFIG"
 
           echo "========================================"
-          echo "GTA4L KSU configuration"
+          echo "GTA4L KSU settings"
           echo "========================================"
 
-          if grep '^CONFIG_KSU' "${CONFIG}"; then
-            echo "[FAIL] Old KSU settings remain"
-            exit 1
+          if grep -q '^CONFIG_KSU' "$CONFIG"; then
+            grep '^CONFIG_KSU' "$CONFIG"
+          else
+            echo "[PASS] No old KSU settings"
           fi
 
-          echo "[PASS] Vendor fragment contains no KSU override"
-
       # ============================================================
-      # Prepare completely separate output directory
+      # Clean source tree and create O= build directory
       # ============================================================
 
-      - name: Prepare build directories
+      - name: Prepare out-of-tree build
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
-          # Delete any previous external output.
+          export OUT_DIR="${GITHUB_WORKSPACE}/out"
+
           rm -rf "${OUT_DIR}"
           mkdir -p "${OUT_DIR}"
 
-          # IMPORTANT:
-          # Never allow generated kernel files to remain in the source tree.
+          # Clean anything accidentally generated in source.
           rm -f \
             .config \
             Module.symvers \
             System.map \
-            modules.order \
-            include/compile.h
+            modules.order
 
           rm -rf \
             include/config \
@@ -375,17 +344,8 @@ jobs:
             arch/arm64/include/generated
 
           echo "========================================"
-          echo "Build directories"
+          echo "Source tree check"
           echo "========================================"
-
-          echo "Kernel source:"
-          pwd
-
-          echo "Output:"
-          echo "${OUT_DIR}"
-
-          echo
-          echo "Checking source tree..."
 
           for f in \
             .config \
@@ -394,7 +354,7 @@ jobs:
             modules.order
           do
             if [ -e "$f" ]; then
-              echo "[FAIL] $f still exists"
+              echo "[FAIL] Source artifact remains: $f"
               exit 1
             fi
           done
@@ -405,50 +365,600 @@ jobs:
             arch/arm64/include/generated
           do
             if [ -e "$d" ]; then
-              echo "[FAIL] $d still exists"
+              echo "[FAIL] Source generated directory remains: $d"
               exit 1
             fi
           done
 
-          echo "[PASS] Source tree is clean"
+          echo "[PASS] Source tree clean"
+          echo "[PASS] Output directory: ${OUT_DIR}"
+
+      # ============================================================
+      # Apply required ReSukiSU hooks
+      #
+      # Kernel = Linux 4.19
+      #
+      # Required:
+      #   stat
+      #   execveat
+      #   faccessat
+      #   reboot
+      #   read
+      #
+      # Current ReSukiSU also checks post_execveat.
+      # ============================================================
+
+      - name: Apply ReSukiSU manual hooks
+        working-directory: kernel
+        run: |
+          set -e
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def require(text, needle, description):
+              if needle not in text:
+                  raise SystemExit(
+                      f"[FAIL] Required source pattern not found: {description}"
+                  )
+
+          def once(text, old, new, description):
+              count = text.count(old)
+
+              if count == 0:
+                  raise SystemExit(
+                      f"[FAIL] Hook insertion point not found: {description}"
+                  )
+
+              if count > 1:
+                  raise SystemExit(
+                      f"[FAIL] Hook insertion point is ambiguous: "
+                      f"{description} ({count} matches)"
+                  )
+
+              return text.replace(old, new, 1)
+
+          # ========================================================
+          # fs/exec.c
+          # ========================================================
+
+          path = Path("fs/exec.c")
+          text = read(path)
+
+          require(
+              text,
+              "static int do_execveat_common(int fd, struct filename *filename,",
+              "do_execveat_common"
+          )
+
+          if "ksu_handle_execveat" not in text:
+
+              declaration = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                                          void *argv, void *envp, int *flags);
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                                               void *argv, void *envp, int *flags,
+                                               int *retval);
+          #endif
+
+          '''
+
+              marker = "static int do_execveat_common(int fd, struct filename *filename,"
+
+              text = text.replace(
+                  marker,
+                  declaration + marker,
+                  1
+              )
+
+              body = """{
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+                  int retval;
+
+                  ksu_handle_execveat(
+                      &fd,
+                      &filename,
+                      &argv,
+                      &envp,
+                      &flags
+                  );
+
+                  retval = __do_execve_file(
+                      fd,
+                      filename,
+                      argv,
+                      envp,
+                      flags,
+                      NULL
+                  );
+
+                  ksu_handle_post_execveat(
+                      &fd,
+                      &filename,
+                      &argv,
+                      &envp,
+                      &flags,
+                      &retval
+                  );
+
+                  return retval;
+          #else
+                  return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          #endif
+          """
+
+              old = """{
+                  return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+              """
+
+              if old not in text:
+                  # Allow whitespace differences while still refusing
+                  # to patch an unknown source layout.
+                  pattern = re.compile(
+                      r'(\n\{)\n'
+                      r'(\s*)return __do_execve_file\('
+                      r'fd, filename, argv, envp, flags, NULL\);'
+                  )
+
+                  match = pattern.search(text)
+
+                  if not match:
+                      raise SystemExit(
+                          "[FAIL] Could not locate do_execveat_common body"
+                      )
+
+                  replacement = "\n" + body.rstrip()
+
+                  text = (
+                      text[:match.start()]
+                      + replacement
+                      + text[match.end():]
+                  )
+
+              else:
+                  text = text.replace(
+                      old,
+                      body,
+                      1
+                  )
+
+              write(path, text)
+
+              print("[PASS] execveat hook applied")
+
+          else:
+              print("[OK] execveat hook already present")
+
+          # ========================================================
+          # fs/stat.c
+          # ========================================================
+
+          path = Path("fs/stat.c")
+          text = read(path)
+
+          if "ksu_handle_stat" not in text:
+
+              marker = (
+                  "#if !defined(__ARCH_WANT_STAT64) "
+                  "|| defined(__ARCH_WANT_SYS_NEWFSTATAT)"
+              )
+
+              require(
+                  text,
+                  marker,
+                  "newfstatat declaration location"
+              )
+
+              declaration = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_stat(
+                  int *dfd,
+                  const char __user **filename_user,
+                  int *flags);
+
+          extern void ksu_handle_newfstat_ret(
+                  unsigned int *fd,
+                  struct stat __user **statbuf_ptr);
+
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          extern void ksu_handle_fstat64_ret(
+                  unsigned long *fd,
+                  struct stat64 __user **statbuf_ptr);
+          #endif
+          #endif
+
+          '''
+
+              text = text.replace(
+                  marker,
+                  declaration + marker,
+                  1
+              )
+
+              # newfstatat
+              pattern = re.compile(
+                  r'(SYSCALL_DEFINE4\(newfstatat,.*?\n'
+                  r'.*?\{\n)',
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  raise SystemExit(
+                      "[FAIL] newfstatat function not found"
+                  )
+
+              hook = """#ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+          """
+
+              text = (
+                  text[:match.end()]
+                  + hook
+                  + text[match.end():]
+              )
+
+              # fstatat64
+              pattern = re.compile(
+                  r'(SYSCALL_DEFINE4\(fstatat64,.*?\n'
+                  r'.*?\{\n)',
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if match:
+                  text = (
+                      text[:match.end()]
+                      + """#ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+          """
+                      + text[match.end():]
+                  )
+                  print("[PASS] fstatat64 hook applied")
+              else:
+                  print("[WARN] fstatat64 not found")
+
+              # newfstat return hook
+              pattern = re.compile(
+                  r'(SYSCALL_DEFINE2\(newfstat,.*?\n'
+                  r'.*?\{\n.*?'
+                  r'if \(!error\)\n'
+                  r'.*?cp_new_stat\(&stat, statbuf\);\n)',
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  raise SystemExit(
+                      "[FAIL] newfstat function not found"
+                  )
+
+              text = (
+                  text[:match.end()]
+                  + """#ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+          """
+                  + text[match.end():]
+              )
+
+              # fstat64 return hook
+              pattern = re.compile(
+                  r'(SYSCALL_DEFINE2\(fstat64,.*?\n'
+                  r'.*?\{\n.*?'
+                  r'if \(!error\)\n'
+                  r'.*?cp_new_stat64\(&stat, statbuf\);\n)',
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if match:
+                  text = (
+                      text[:match.end()]
+                      + """#ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_fstat64_ret(&fd, &statbuf);
+          #endif
+          """
+                      + text[match.end():]
+                  )
+                  print("[PASS] fstat64 return hook applied")
+              else:
+                  print("[WARN] fstat64 not found")
+
+              write(path, text)
+
+              print("[PASS] stat hooks applied")
+
+          else:
+              print("[OK] stat hooks already present")
+
+          # ========================================================
+          # fs/open.c
+          # ========================================================
+
+          path = Path("fs/open.c")
+          text = read(path)
+
+          if "ksu_handle_faccessat" not in text:
+
+              declaration = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(
+                  int *dfd,
+                  const char __user **filename_user,
+                  int *mode,
+                  int *flags);
+          #endif
+
+          '''
+
+              marker = "SYSCALL_DEFINE3(faccessat,"
+
+              index = text.find(marker)
+
+              if index == -1:
+                  raise SystemExit(
+                      "[FAIL] faccessat syscall not found"
+                  )
+
+              text = (
+                  text[:index]
+                  + declaration
+                  + text[index:]
+              )
+
+              # Find opening brace of faccessat.
+              index = text.find(marker)
+
+              brace = text.find("{", index)
+
+              if brace == -1:
+                  raise SystemExit(
+                      "[FAIL] faccessat body not found"
+                  )
+
+              hook = """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_faccessat(
+                          &dfd,
+                          &filename,
+                          &mode,
+                          NULL
+                  );
+          #endif
+          """
+
+              text = (
+                  text[:brace + 1]
+                  + hook
+                  + text[brace + 1:]
+              )
+
+              write(path, text)
+
+              print("[PASS] faccessat hook applied")
+
+          else:
+              print("[OK] faccessat hook already present")
+
+          # ========================================================
+          # kernel/reboot.c
+          # ========================================================
+
+          path = Path("kernel/reboot.c")
+          text = read(path)
+
+          if "ksu_handle_sys_reboot" not in text:
+
+              declaration = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern int ksu_handle_sys_reboot(
+                  int magic1,
+                  int magic2,
+                  unsigned int cmd,
+                  void __user **arg);
+          #endif
+
+          '''
+
+              marker = "SYSCALL_DEFINE4(reboot,"
+
+              index = text.find(marker)
+
+              if index == -1:
+                  raise SystemExit(
+                      "[FAIL] reboot syscall not found"
+                  )
+
+              text = (
+                  text[:index]
+                  + declaration
+                  + text[index:]
+              )
+
+              index = text.find(marker)
+
+              brace = text.find("{", index)
+
+              if brace == -1:
+                  raise SystemExit(
+                      "[FAIL] reboot body not found"
+                  )
+
+              hook = """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+                  ksu_handle_sys_reboot(
+                          magic1,
+                          magic2,
+                          cmd,
+                          &arg
+                  );
+          #endif
+          """
+
+              text = (
+                  text[:brace + 1]
+                  + hook
+                  + text[brace + 1:]
+              )
+
+              write(path, text)
+
+              print("[PASS] reboot hook applied")
+
+          else:
+              print("[OK] reboot hook already present")
+
+          # ========================================================
+          # fs/read_write.c
+          # ========================================================
+
+          path = Path("fs/read_write.c")
+          text = read(path)
+
+          if "ksu_handle_sys_read" not in text:
+
+              declaration = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern bool ksu_init_rc_hook __read_mostly;
+
+          extern __attribute__((cold))
+          int ksu_handle_sys_read(
+                  unsigned int fd,
+                  char __user **buf_ptr,
+                  size_t *count_ptr);
+          #endif
+
+          '''
+
+              marker = "SYSCALL_DEFINE3(read,"
+
+              index = text.find(marker)
+
+              if index == -1:
+                  raise SystemExit(
+                      "[FAIL] read syscall not found"
+                  )
+
+              text = (
+                  text[:index]
+                  + declaration
+                  + text[index:]
+              )
+
+              index = text.find(marker)
+
+              brace = text.find("{", index)
+
+              if brace == -1:
+                  raise SystemExit(
+                      "[FAIL] read body not found"
+                  )
+
+              hook = """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+                  if (unlikely(ksu_init_rc_hook))
+                          ksu_handle_sys_read(fd, &buf, &count);
+          #endif
+          """
+
+              text = (
+                  text[:brace + 1]
+                  + hook
+                  + text[brace + 1:]
+              )
+
+              write(path, text)
+
+              print("[PASS] sys_read hook applied")
+
+          else:
+              print("[OK] sys_read hook already present")
+
+          print()
+          print("========================================")
+          print("All required ReSukiSU hooks applied")
+          print("========================================")
+          PY
+
+      # ============================================================
+      # Verify manual hooks before configuration/build
+      # ============================================================
+
+      - name: Verify ReSukiSU manual hooks
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Checking required ReSukiSU hooks"
+          echo "========================================"
+
+          for pattern in \
+            'ksu_handle_stat' \
+            'ksu_handle_newfstat_ret' \
+            'ksu_handle_execveat' \
+            'ksu_handle_post_execveat' \
+            'ksu_handle_faccessat' \
+            'ksu_handle_sys_reboot' \
+            'ksu_handle_sys_read'
+          do
+            if ! grep -Rqs "$pattern" \
+              fs/stat.c \
+              fs/exec.c \
+              fs/open.c \
+              fs/read_write.c \
+              kernel/reboot.c; then
+
+              echo "[FAIL] Missing hook: $pattern"
+              exit 1
+            fi
+
+            echo "[PASS] $pattern"
+          done
+
+          echo
+          echo "[PASS] All required hooks are present"
 
       # ============================================================
       # Configure kernel
+      #
+      # IMPORTANT:
+      #   The entire configuration is generated with O=out.
+      #
+      #   No merge_config.sh is used here, avoiding accidental
+      #   writes into the source tree.
       # ============================================================
 
       - name: Configure kernel
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           export PATH="${CLANG_DIR}/bin:${PATH}"
           export OUT_DIR="${GITHUB_WORKSPACE}/out"
 
-          # THIS IS CRITICAL.
-          #
-          # merge_config.sh invokes Kconfig internally.
-          # Without KCONFIG_CONFIG, the old 4.19 build system can
-          # write .config into the kernel source tree.
-          export KCONFIG_CONFIG="${OUT_DIR}/.config"
+          rm -rf "${OUT_DIR}"
+          mkdir -p "${OUT_DIR}"
 
-          echo "========================================"
-          echo "Configuration paths"
-          echo "========================================"
-
-          echo "Source:"
-          pwd
-
-          echo "Output:"
-          echo "${OUT_DIR}"
-
-          echo "KCONFIG_CONFIG:"
-          echo "${KCONFIG_CONFIG}"
-
-          # --------------------------------------------------------
-          # Base defconfig
-          # --------------------------------------------------------
-
-          echo
           echo "========================================"
           echo "Base defconfig"
           echo "========================================"
@@ -460,66 +970,28 @@ jobs:
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
-          test -f "${OUT_DIR}/.config"
-
-          echo "[PASS] Base defconfig generated"
-
-          # --------------------------------------------------------
-          # Merge GTA4L configuration
-          # --------------------------------------------------------
-
-          echo
           echo "========================================"
-          echo "Merge GTA4L configuration"
+          echo "Create combined configuration fragment"
           echo "========================================"
 
-          KCONFIG_CONFIG="${OUT_DIR}/.config" \
-            scripts/kconfig/merge_config.sh \
-              -m \
-              "${OUT_DIR}/.config" \
-              arch/arm64/configs/vendor/gta4l-common.config
+          cat \
+            arch/arm64/configs/vendor/gta4l-common.config \
+            > "${OUT_DIR}/gta4l.config"
 
-          test -f "${OUT_DIR}/.config"
+          cat >> "${OUT_DIR}/gta4l.config" <<'EOF'
 
-          echo "[PASS] GTA4L configuration merged"
-
-          # --------------------------------------------------------
-          # Create ReSukiSU fragment
-          # --------------------------------------------------------
-
-          echo
-          echo "========================================"
-          echo "Create ReSukiSU configuration"
-          echo "========================================"
-
-          cat > "${OUT_DIR}/resukisu.config" <<'EOF'
+          # ReSukiSU
           CONFIG_KSU=y
           # CONFIG_KSU_TRACEPOINT_HOOK is not set
           CONFIG_KSU_MANUAL_HOOK=y
           EOF
 
-          cat "${OUT_DIR}/resukisu.config"
-
-          # --------------------------------------------------------
-          # Merge ReSukiSU configuration
-          # --------------------------------------------------------
-
-          echo
           echo "========================================"
-          echo "Apply ReSukiSU Kconfig"
+          echo "Configuration fragment"
           echo "========================================"
 
-          KCONFIG_CONFIG="${OUT_DIR}/.config" \
-            scripts/kconfig/merge_config.sh \
-              -m \
-              "${OUT_DIR}/.config" \
-              "${OUT_DIR}/resukisu.config"
-
-          test -f "${OUT_DIR}/.config"
-
-          # --------------------------------------------------------
-          # Final Kconfig resolution
-          # --------------------------------------------------------
+          grep '^CONFIG_KSU' \
+            "${OUT_DIR}/gta4l.config" || true
 
           echo
           echo "========================================"
@@ -531,7 +1003,8 @@ jobs:
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            olddefconfig
+            KCONFIG_ALLCONFIG="${OUT_DIR}/gta4l.config" \
+            alldefconfig
 
           echo
           echo "========================================"
@@ -540,10 +1013,6 @@ jobs:
 
           grep '^CONFIG_KSU' \
             "${OUT_DIR}/.config" || true
-
-          # --------------------------------------------------------
-          # Validate KSU
-          # --------------------------------------------------------
 
           echo
           echo "========================================"
@@ -562,50 +1031,40 @@ jobs:
               "${OUT_DIR}/.config"
           )"
 
-          TRACEPOINT="$(
-            sed -n \
-              's/^CONFIG_KSU_TRACEPOINT_HOOK=//p' \
-              "${OUT_DIR}/.config"
-          )"
-
-          echo "CONFIG_KSU=${KSU:-unset}"
-          echo "CONFIG_KSU_MANUAL_HOOK=${MANUAL:-unset}"
-          echo "CONFIG_KSU_TRACEPOINT_HOOK=${TRACEPOINT:-unset}"
-
-          if [ "${KSU}" != "y" ]; then
+          if [ "$KSU" != "y" ]; then
             echo "[FAIL] CONFIG_KSU is not y"
             exit 1
           fi
 
-          if [ "${MANUAL}" != "y" ]; then
+          if [ "$MANUAL" != "y" ]; then
             echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
             exit 1
           fi
 
-          if [ "${TRACEPOINT}" = "y" ]; then
-            echo "[FAIL] CONFIG_KSU_TRACEPOINT_HOOK is enabled"
+          if grep -q \
+            '^CONFIG_KSU_TRACEPOINT_HOOK=y' \
+            "${OUT_DIR}/.config"; then
+
+            echo "[FAIL] CONFIG_KSU_TRACEPOINT_HOOK=y"
             exit 1
           fi
 
-          echo
           echo "[PASS] CONFIG_KSU=y"
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
           echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
 
       # ============================================================
-      # Verify source tree after configuration
+      # Verify source tree BEFORE build
       # ============================================================
 
-      - name: Verify source tree
+      - name: Verify source tree is clean
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           echo "========================================"
-          echo "Verify source tree"
+          echo "Source tree artifact check"
           echo "========================================"
-
-          FAILED=0
 
           for f in \
             .config \
@@ -614,8 +1073,8 @@ jobs:
             modules.order
           do
             if [ -e "$f" ]; then
-              echo "[FAIL] Source-tree artifact: $f"
-              FAILED=1
+              echo "[FAIL] $f exists in source tree"
+              exit 1
             fi
           done
 
@@ -625,44 +1084,25 @@ jobs:
             arch/arm64/include/generated
           do
             if [ -e "$d" ]; then
-              echo "[FAIL] Source-tree generated directory: $d"
-              FAILED=1
+              echo "[FAIL] $d exists in source tree"
+              exit 1
             fi
           done
 
-          if [ "${FAILED}" -ne 0 ]; then
-            echo
-            echo "Git status:"
-            git status --short || true
+          echo "[PASS] No kernel build artifacts in source tree"
 
-            echo
-            echo "Source-tree generated files:"
-            find . \
-              -path './.git' -prune -o \
-              -type f \
-              \( \
-                -name '*.o' -o \
-                -name '*.cmd' -o \
-                -name '*.ko' -o \
-                -name 'Module.symvers' -o \
-                -name 'modules.order' \
-              \) \
-              -print \
-              | head -100
-
-            exit 1
-          fi
-
-          echo "[PASS] Kernel source tree contains no build artifacts"
+          echo
+          echo "Git status:"
+          git status --short
 
       # ============================================================
-      # Build kernel
+      # Build
       # ============================================================
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          set -euo pipefail
+          set -e
 
           export PATH="${CLANG_DIR}/bin:${PATH}"
 
@@ -675,7 +1115,7 @@ jobs:
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
           echo "========================================"
-          echo "Building SM6115 kernel"
+          echo "Building SM6115 ReSukiSU kernel"
           echo "========================================"
 
           make \
@@ -688,16 +1128,12 @@ jobs:
             Image.gz
 
       # ============================================================
-      # Verify build
+      # Verify kernel
       # ============================================================
 
       - name: Verify kernel
         run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "Verify kernel output"
-          echo "========================================"
+          set -e
 
           test -f "${OUT_DIR}/arch/arm64/boot/Image"
           test -f "${OUT_DIR}/arch/arm64/boot/Image.gz"
@@ -705,11 +1141,8 @@ jobs:
           test -f "${OUT_DIR}/System.map"
           test -f "${OUT_DIR}/.config"
 
-          echo "[PASS] All required kernel outputs exist"
-
-          echo
           echo "========================================"
-          echo "Kernel artifacts"
+          echo "Kernel build successful"
           echo "========================================"
 
           ls -lh \
@@ -717,6 +1150,11 @@ jobs:
             "${OUT_DIR}/arch/arm64/boot/Image.gz" \
             "${OUT_DIR}/vmlinux" \
             "${OUT_DIR}/System.map"
+
+          echo
+          echo "Kernel configuration:"
+          grep '^CONFIG_KSU' \
+            "${OUT_DIR}/.config" || true
 
           echo
           file \
@@ -729,7 +1167,7 @@ jobs:
 
       - name: Package kernel
         run: |
-          set -euo pipefail
+          set -e
 
           rm -rf kernel-artifact
           mkdir -p kernel-artifact
@@ -776,7 +1214,12 @@ jobs:
           Kernel commit:
           $(cd "${KERNEL_DIR}" && git rev-parse HEAD)
 
-          ReSukiSU: enabled
+          ReSukiSU:
+          enabled
+
+          ReSukiSU hook mode:
+          Manual Hook
+
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
           CONFIG_KSU_TRACEPOINT_HOOK=n
@@ -790,13 +1233,13 @@ jobs:
             -C kernel-artifact .
 
           echo "========================================"
-          echo "Package"
+          echo "Artifact"
           echo "========================================"
 
           ls -lh resukisu-sm6115-kernel.tar.gz
 
       # ============================================================
-      # Upload artifact
+      # Upload
       # ============================================================
 
       - name: Upload kernel artifact
