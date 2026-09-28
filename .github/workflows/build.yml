@@ -335,6 +335,23 @@ jobs:
       # ============================================================
       # Configure kernel
       # ============================================================
+      - name: Prepare build directories
+        working-directory: kernel
+        run: |
+          set -e
+
+          export OUT_DIR="${GITHUB_WORKSPACE}/out"
+
+          rm -rf "${OUT_DIR}"
+          mkdir -p "${OUT_DIR}"
+
+          # Remove build artifacts accidentally created in the source tree.
+          rm -f .config Module.symvers System.map modules.order
+          rm -rf include/config include/generated
+          rm -rf arch/arm64/include/generated
+
+          echo "Source tree after cleanup:"
+          ls -la .config Module.symvers System.map modules.order 2>/dev/null || true
 
       - name: Configure kernel
         working-directory: kernel
