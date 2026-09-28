@@ -805,45 +805,51 @@ jobs:
             LLVM_IAS=1 \
             olddefconfig
 
-      - name: Validate kernel configuration
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -eux
+            - name: Validate kernel configuration
+              working-directory: kernel
+              shell: bash
+              run: |
+                set -eux
 
-          CONFIG=out/.config
+                CONFIG=out/.config
 
-          grep -q '^CONFIG_KSU=y$' "$CONFIG"
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CONFIG"
-          grep -q '^CONFIG_COMPAT=y$'
+                echo "===== Checking ReSukiSU configuration ====="
 
-          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$CONFIG"; then
-            echo "ERROR: Tracepoint hook is enabled"
-            exit 1
-          fi
+                grep -q '^CONFIG_KSU=y$' "$CONFIG"
+                grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CONFIG"
+                grep -q '^CONFIG_COMPAT=y$' "$CONFIG"
 
-          if grep -q '^CONFIG_COMPAT_VDSO=y$' "$CONFIG"; then
-            echo "ERROR: CONFIG_COMPAT_VDSO=y"
-            exit 1
-          fi
+                if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$CONFIG"; then
+                  echo "ERROR: CONFIG_KSU_TRACEPOINT_HOOK=y"
+                  exit 1
+                fi
 
-          if grep -q '^CONFIG_VDSO32=y$' "$CONFIG"; then
-            echo "ERROR: CONFIG_VDSO32=y"
-            exit 1
-          fi
+                if grep -q '^CONFIG_COMPAT_VDSO=y$' "$CONFIG"; then
+                  echo "ERROR: CONFIG_COMPAT_VDSO=y"
+                  exit 1
+                fi
 
-          grep -q '^CONFIG_MODULES=y$' "$CONFIG"
-          grep -q '^CONFIG_LTO_CLANG=y$' "$CONFIG"
-          grep -q '^CONFIG_CFI_CLANG=y$' "$CONFIG"
-          grep -q '^CONFIG_SHADOW_CALL_STACK=y$' "$CONFIG"
-          grep -q '^CONFIG_KALLSYMS_ALL=y$'
-          grep -q '^CONFIG_GTA4L_DTB=y$'
+                if grep -q '^CONFIG_VDSO32=y$' "$CONFIG"; then
+                  echo "ERROR: CONFIG_VDSO32=y"
+                  exit 1
+                fi
 
-          echo
-          echo "===== ReSukiSU configuration ====="
-          grep -E \
-            'CONFIG_KSU=|CONFIG_COMPAT=|CONFIG_COMPAT_VDSO=|CONFIG_VDSO32=|CONFIG_MODULES=|CONFIG_LTO_CLANG=|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_KALLSYMS_ALL=|CONFIG_GTA4L_DTB=' \
-            "$CONFIG" || true
+                grep -q '^CONFIG_MODULES=y$' "$CONFIG"
+                grep -q '^CONFIG_LTO_CLANG=y$' "$CONFIG"
+                grep -q '^CONFIG_CFI_CLANG=y$' "$CONFIG"
+                grep -q '^CONFIG_SHADOW_CALL_STACK=y$' "$CONFIG"
+                grep -q '^CONFIG_KALLSYMS_ALL=y$' "$CONFIG"
+                grep -q '^CONFIG_GTA4L_DTB=y$' "$CONFIG"
+
+                echo
+                echo "===== Relevant kernel configuration ====="
+
+                grep -E \
+                  '^(CONFIG_KSU|CONFIG_COMPAT|CONFIG_COMPAT_VDSO|CONFIG_VDSO32|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_KALLSYMS_ALL|CONFIG_GTA4L_DTB)=' \
+                  "$CONFIG" || true
+
+                echo
+                echo "===== Configuration validation PASSED ====="
 
       - name: Build kernel
         working-directory: kernel
