@@ -29,7 +29,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          set -e
+          set -euo pipefail
 
           sudo apt-get update
 
@@ -59,12 +59,12 @@ jobs:
             gcc-arm-linux-gnueabi
 
       # ============================================================
-      # Kernel source
+      # Clone kernel
       # ============================================================
 
       - name: Clone LineageOS SM6115 kernel
         run: |
-          set -e
+          set -euo pipefail
 
           git clone \
             --depth=1 \
@@ -80,18 +80,23 @@ jobs:
           echo "========================================"
 
           git remote -v
-          echo "Branch: $(git branch --show-current)"
-          echo "Commit: $(git rev-parse HEAD)"
+
+          echo "Branch:"
+          git branch --show-current
+
+          echo "Commit:"
+          git rev-parse HEAD
+
           echo "Kernel version:"
           make kernelversion
 
       # ============================================================
-      # LineageOS clang-r416183b
+      # Clone clang
       # ============================================================
 
       - name: Clone clang-r416183b
         run: |
-          set -e
+          set -euo pipefail
 
           git clone \
             --depth=1 \
@@ -109,14 +114,16 @@ jobs:
           test -x "${CLANG_DIR}/bin/clang"
           test -x "${CLANG_DIR}/bin/ld.lld"
 
+          echo "[PASS] Clang verified"
+
       # ============================================================
-      # Verify kernel tree
+      # Verify kernel source
       # ============================================================
 
       - name: Verify kernel tree
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
           for file in \
             fs/stat.c \
@@ -125,9 +132,13 @@ jobs:
             fs/read_write.c \
             kernel/reboot.c \
             arch/arm64/configs/vendor/bengal-perf_defconfig \
-            arch/arm64/configs/vendor/gta4l-common.config
+            arch/arm64/configs/vendor/gta4l-common.config \
+            scripts/kconfig/merge_config.sh
           do
-            test -f "$file"
+            if [ ! -f "$file" ]; then
+              echo "[FAIL] Missing: $file"
+              exit 1
+            fi
           done
 
           echo "[PASS] Kernel tree verified"
@@ -157,71 +168,65 @@ jobs:
 
           git -C KernelSU rev-parse HEAD
 
-          DRIVER_DIR="$PWD/drivers"
+          DRIVER_DIR="${PWD}/drivers"
 
-          test -d "$DRIVER_DIR"
+          test -d "${DRIVER_DIR}"
 
-          rm -f "$DRIVER_DIR/kernelsu"
+          # Remove an old kernelsu entry if present.
+          rm -rf "${DRIVER_DIR}/kernelsu"
 
+          # Link ReSukiSU into drivers/kernelsu.
           ln -s \
-            "$(realpath --relative-to="$DRIVER_DIR" "$PWD/KernelSU/kernel")" \
-            "$DRIVER_DIR/kernelsu"
+            "$(realpath --relative-to="${DRIVER_DIR}" "${PWD}/KernelSU/kernel")" \
+            "${DRIVER_DIR}/kernelsu"
 
+          # Add the Kbuild entry exactly once.
           if ! grep -qF \
             'obj-$(CONFIG_KSU) += kernelsu/' \
-            "$DRIVER_DIR/Makefile"; then
+            "${DRIVER_DIR}/Makefile"; then
 
             printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
-              >> "$DRIVER_DIR/Makefile"
+              >> "${DRIVER_DIR}/Makefile"
           fi
 
+          # Add Kconfig entry exactly once.
           if ! grep -qF \
             'source "drivers/kernelsu/Kconfig"' \
-            "$DRIVER_DIR/Kconfig"; then
+            "${DRIVER_DIR}/Kconfig"; then
 
             printf '\nsource "drivers/kernelsu/Kconfig"\n' \
-              >> "$DRIVER_DIR/Kconfig"
+              >> "${DRIVER_DIR}/Kconfig"
           fi
 
-          test -L "$DRIVER_DIR/kernelsu"
+          test -L "${DRIVER_DIR}/kernelsu"
 
           echo "[PASS] ReSukiSU installed"
 
       # ============================================================
-      # Force ReSukiSU manual hooks
-      #
-      # SM-T505 = 4.19 non-GKI
-      #
-      # ReSukiSU's default choice is:
-      #
-      #   default KSU_TRACEPOINT_HOOK
-      #
-      # Tracepoint hook requires 5.10+ GKI.
-      #
-      # Change only the CI checkout to:
-      #
-      #   default KSU_MANUAL_HOOK
+      # Force ReSukiSU manual hook
       # ============================================================
 
       - name: Configure ReSukiSU manual hook mode
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
           KSU_KCONFIG="KernelSU/kernel/Kconfig"
 
-          test -f "$KSU_KCONFIG"
+          test -f "${KSU_KCONFIG}"
 
           echo "========================================"
-          echo "Original ReSukiSU hook choice"
+          echo "Original ReSukiSU hook configuration"
           echo "========================================"
 
           grep -n -A20 \
             'prompt "KernelSU Hooking Method"' \
-            "$KSU_KCONFIG"
+            "${KSU_KCONFIG}"
 
           echo
-          echo "Forcing manual hook as the default..."
+          echo "========================================"
+          echo "Changing default to manual hook"
+          echo "========================================"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -235,7 +240,7 @@ jobs:
 
           if start == -1:
               raise SystemExit(
-                  "ERROR: KernelSU Hooking Method choice not found"
+                  "ERROR: KernelSU Hooking Method prompt not found"
               )
 
           end = text.find(
@@ -265,38 +270,40 @@ jobs:
               path.write_text(text)
 
               print(
-                  "[PASS] Changed "
+                  "[PASS] Changed default "
                   "KSU_TRACEPOINT_HOOK -> KSU_MANUAL_HOOK"
               )
 
           elif new in block:
               print(
-                  "[OK] Manual hook is already "
-                  "the default"
+                  "[OK] Manual hook is already the default"
               )
 
           else:
               print(block)
               raise SystemExit(
-                  "ERROR: Neither expected Kconfig "
-                  "default was found"
+                  "ERROR: Expected ReSukiSU Kconfig default not found"
               )
           PY
 
           echo
           echo "========================================"
-          echo "Modified ReSukiSU hook choice"
+          echo "Modified ReSukiSU hook configuration"
           echo "========================================"
 
           grep -n -A20 \
             'prompt "KernelSU Hooking Method"' \
-            "$KSU_KCONFIG"
+            "${KSU_KCONFIG}"
 
-          grep -A5 \
+          if ! grep -A5 \
             'prompt "KernelSU Hooking Method"' \
-            "$KSU_KCONFIG" \
+            "${KSU_KCONFIG}" \
             | grep -q \
-            'default KSU_MANUAL_HOOK'
+            'default KSU_MANUAL_HOOK'; then
+
+            echo "[FAIL] Manual hook is not the Kconfig default"
+            exit 1
+          fi
 
           echo "[PASS] Manual hook is Kconfig default"
 
@@ -307,200 +314,355 @@ jobs:
       - name: Prepare GTA4L configuration
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
           CONFIG="arch/arm64/configs/vendor/gta4l-common.config"
 
-          cp "$CONFIG" "${CONFIG}.original"
+          test -f "${CONFIG}"
 
+          # Keep an untouched copy for the final artifact.
+          cp "${CONFIG}" "${CONFIG}.original"
+
+          # Remove any existing KSU selections from the vendor fragment.
           sed -i \
             '/^[[:space:]]*CONFIG_KSU=y[[:space:]]*$/d' \
-            "$CONFIG"
+            "${CONFIG}"
 
           sed -i \
             '/^[[:space:]]*CONFIG_KSU_MANUAL_HOOK=y[[:space:]]*$/d' \
-            "$CONFIG"
+            "${CONFIG}"
 
           sed -i \
             '/^[[:space:]]*CONFIG_KSU_TRACEPOINT_HOOK=y[[:space:]]*$/d' \
-            "$CONFIG"
+            "${CONFIG}"
 
           echo "========================================"
           echo "GTA4L KSU configuration"
           echo "========================================"
 
-          grep '^CONFIG_KSU' "$CONFIG" || \
-            echo "[PASS] No old KSU settings"
+          if grep '^CONFIG_KSU' "${CONFIG}"; then
+            echo "[FAIL] Old KSU settings remain"
+            exit 1
+          fi
+
+          echo "[PASS] Vendor fragment contains no KSU override"
+
+      # ============================================================
+      # Prepare completely separate output directory
+      # ============================================================
+
+      - name: Prepare build directories
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          # Delete any previous external output.
+          rm -rf "${OUT_DIR}"
+          mkdir -p "${OUT_DIR}"
+
+          # IMPORTANT:
+          # Never allow generated kernel files to remain in the source tree.
+          rm -f \
+            .config \
+            Module.symvers \
+            System.map \
+            modules.order \
+            include/compile.h
+
+          rm -rf \
+            include/config \
+            include/generated \
+            arch/arm64/include/generated
+
+          echo "========================================"
+          echo "Build directories"
+          echo "========================================"
+
+          echo "Kernel source:"
+          pwd
+
+          echo "Output:"
+          echo "${OUT_DIR}"
+
+          echo
+          echo "Checking source tree..."
+
+          for f in \
+            .config \
+            Module.symvers \
+            System.map \
+            modules.order
+          do
+            if [ -e "$f" ]; then
+              echo "[FAIL] $f still exists"
+              exit 1
+            fi
+          done
+
+          for d in \
+            include/config \
+            include/generated \
+            arch/arm64/include/generated
+          do
+            if [ -e "$d" ]; then
+              echo "[FAIL] $d still exists"
+              exit 1
+            fi
+          done
+
+          echo "[PASS] Source tree is clean"
 
       # ============================================================
       # Configure kernel
       # ============================================================
-      - name: Prepare build directories
+
+      - name: Configure kernel
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
+          export PATH="${CLANG_DIR}/bin:${PATH}"
           export OUT_DIR="${GITHUB_WORKSPACE}/out"
 
-          rm -rf "${OUT_DIR}"
-          mkdir -p "${OUT_DIR}"
+          # THIS IS CRITICAL.
+          #
+          # merge_config.sh invokes Kconfig internally.
+          # Without KCONFIG_CONFIG, the old 4.19 build system can
+          # write .config into the kernel source tree.
+          export KCONFIG_CONFIG="${OUT_DIR}/.config"
 
-          # Remove build artifacts accidentally created in the source tree.
-          rm -f .config Module.symvers System.map modules.order
-          rm -rf include/config include/generated
-          rm -rf arch/arm64/include/generated
+          echo "========================================"
+          echo "Configuration paths"
+          echo "========================================"
 
-          echo "Source tree after cleanup:"
-          ls -la .config Module.symvers System.map modules.order 2>/dev/null || true
+          echo "Source:"
+          pwd
 
-            - name: Configure kernel
-              working-directory: kernel
-              run: |
-                set -e
+          echo "Output:"
+          echo "${OUT_DIR}"
 
-                export PATH="${CLANG_DIR}/bin:${PATH}"
-                export OUT_DIR="${GITHUB_WORKSPACE}/out"
+          echo "KCONFIG_CONFIG:"
+          echo "${KCONFIG_CONFIG}"
 
-                echo "========================================"
-                echo "Base defconfig"
-                echo "========================================"
+          # --------------------------------------------------------
+          # Base defconfig
+          # --------------------------------------------------------
 
-                make \
-                  O="${OUT_DIR}" \
-                  ARCH=arm64 \
-                  LLVM=1 \
-                  LLVM_IAS=1 \
-                 vendor/bengal-perf_defconfig
+          echo
+          echo "========================================"
+          echo "Base defconfig"
+          echo "========================================"
 
-                echo "========================================"
-                echo "Merge GTA4L configuration"
-                echo "========================================"
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
 
-                scripts/kconfig/merge_config.sh \
-                  -m \
-                  -O "${OUT_DIR}" \
-                  "${OUT_DIR}/.config" \
-                  arch/arm64/configs/vendor/gta4l-common.config
+          test -f "${OUT_DIR}/.config"
 
-                echo "========================================"
-                echo "Create ReSukiSU configuration"
-                echo "========================================"
+          echo "[PASS] Base defconfig generated"
 
-                cat > "${OUT_DIR}/resukisu.config" <<'EOF'
-                CONFIG_KSU=y
-                # CONFIG_KSU_TRACEPOINT_HOOK is not set
-                CONFIG_KSU_MANUAL_HOOK=y
-                EOF
+          # --------------------------------------------------------
+          # Merge GTA4L configuration
+          # --------------------------------------------------------
 
-                cat "${OUT_DIR}/resukisu.config"
+          echo
+          echo "========================================"
+          echo "Merge GTA4L configuration"
+          echo "========================================"
 
-                echo
-                echo "========================================"
-                echo "Apply ReSukiSU Kconfig"
-                echo "========================================"
+          KCONFIG_CONFIG="${OUT_DIR}/.config" \
+            scripts/kconfig/merge_config.sh \
+              -m \
+              "${OUT_DIR}/.config" \
+              arch/arm64/configs/vendor/gta4l-common.config
 
-                scripts/kconfig/merge_config.sh \
-                  -O "${OUT_DIR}" \
-                  "${OUT_DIR}/.config" \
-                  "${OUT_DIR}/resukisu.config"
+          test -f "${OUT_DIR}/.config"
 
-                echo
-                echo "========================================"
-                echo "Final KSU configuration"
-                echo "========================================"
+          echo "[PASS] GTA4L configuration merged"
 
-                grep '^CONFIG_KSU' \
-                  "${OUT_DIR}/.config" || true
+          # --------------------------------------------------------
+          # Create ReSukiSU fragment
+          # --------------------------------------------------------
 
-                echo
-                echo "========================================"
-                echo "Validate KSU configuration"
-                echo "========================================"
+          echo
+          echo "========================================"
+          echo "Create ReSukiSU configuration"
+          echo "========================================"
 
-                KSU="$(sed -n \
-                  's/^CONFIG_KSU=//p' \
-                  "${OUT_DIR}/.config")"
+          cat > "${OUT_DIR}/resukisu.config" <<'EOF'
+          CONFIG_KSU=y
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_MANUAL_HOOK=y
+          EOF
 
-                MANUAL="$(sed -n \
-                  's/^CONFIG_KSU_MANUAL_HOOK=//p' \
-                  "${OUT_DIR}/.config")"
+          cat "${OUT_DIR}/resukisu.config"
 
-                if [ "$KSU" != "y" ]; then
-                  echo "[FAIL] CONFIG_KSU is not y"
-                  exit 1
-                fi
+          # --------------------------------------------------------
+          # Merge ReSukiSU configuration
+          # --------------------------------------------------------
 
-                if [ "$MANUAL" != "y" ]; then
-                  echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
-                  exit 1
-                fi
+          echo
+          echo "========================================"
+          echo "Apply ReSukiSU Kconfig"
+          echo "========================================"
 
-                if grep -q \
-                  '^CONFIG_KSU_TRACEPOINT_HOOK=y' \
-                  "${OUT_DIR}/.config"; then
+          KCONFIG_CONFIG="${OUT_DIR}/.config" \
+            scripts/kconfig/merge_config.sh \
+              -m \
+              "${OUT_DIR}/.config" \
+              "${OUT_DIR}/resukisu.config"
 
-                  echo "[FAIL] Tracepoint hook is enabled"
-                  exit 1
-                fi
+          test -f "${OUT_DIR}/.config"
 
-                echo "[PASS] CONFIG_KSU=y"
-                echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
-                echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
+          # --------------------------------------------------------
+          # Final Kconfig resolution
+          # --------------------------------------------------------
+
+          echo
+          echo "========================================"
+          echo "Resolve final configuration"
+          echo "========================================"
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "========================================"
+          echo "Final KSU configuration"
+          echo "========================================"
+
+          grep '^CONFIG_KSU' \
+            "${OUT_DIR}/.config" || true
+
+          # --------------------------------------------------------
+          # Validate KSU
+          # --------------------------------------------------------
+
+          echo
+          echo "========================================"
+          echo "Validate KSU configuration"
+          echo "========================================"
+
+          KSU="$(
+            sed -n \
+              's/^CONFIG_KSU=//p' \
+              "${OUT_DIR}/.config"
+          )"
+
+          MANUAL="$(
+            sed -n \
+              's/^CONFIG_KSU_MANUAL_HOOK=//p' \
+              "${OUT_DIR}/.config"
+          )"
+
+          TRACEPOINT="$(
+            sed -n \
+              's/^CONFIG_KSU_TRACEPOINT_HOOK=//p' \
+              "${OUT_DIR}/.config"
+          )"
+
+          echo "CONFIG_KSU=${KSU:-unset}"
+          echo "CONFIG_KSU_MANUAL_HOOK=${MANUAL:-unset}"
+          echo "CONFIG_KSU_TRACEPOINT_HOOK=${TRACEPOINT:-unset}"
+
+          if [ "${KSU}" != "y" ]; then
+            echo "[FAIL] CONFIG_KSU is not y"
+            exit 1
+          fi
+
+          if [ "${MANUAL}" != "y" ]; then
+            echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
+            exit 1
+          fi
+
+          if [ "${TRACEPOINT}" = "y" ]; then
+            echo "[FAIL] CONFIG_KSU_TRACEPOINT_HOOK is enabled"
+            exit 1
+          fi
+
+          echo
+          echo "[PASS] CONFIG_KSU=y"
+          echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
+          echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
 
       # ============================================================
-      # Build
+      # Verify source tree after configuration
       # ============================================================
-      - name: Diagnose dirty kernel source tree
-        working-directory: kernel
-        run: |
-          echo "=== Git status ==="
-          git status --short
-
-          echo
-          echo "=== Untracked files ==="
-          git ls-files --others --exclude-standard
-
-          echo
-          echo "=== Generated files in source tree ==="
-          find . -maxdepth 3 \
-            \( -name "*.o" -o \
-               -name "*.cmd" -o \
-               -name "*.ko" -o \
-               -name "Module.symvers" -o \
-               -name "modules.order" \) \
-            -print | head -100
-
-          echo
-          echo "=== Source-tree config/build artifacts ==="
-          ls -la .config Module.symvers modules.order 2>/dev/null || true
 
       - name: Verify source tree
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "===== Source tree artifacts ====="
+          echo "========================================"
+          echo "Verify source tree"
+          echo "========================================"
 
-          for f in .config Module.symvers System.map modules.order; do
+          FAILED=0
+
+          for f in \
+            .config \
+            Module.symvers \
+            System.map \
+            modules.order
+          do
             if [ -e "$f" ]; then
-              echo "ERROR: $f exists in kernel source tree"
-              exit 1
+              echo "[FAIL] Source-tree artifact: $f"
+              FAILED=1
             fi
           done
 
-          for d in include/config include/generated arch/arm64/include/generated; do
+          for d in \
+            include/config \
+            include/generated \
+            arch/arm64/include/generated
+          do
             if [ -e "$d" ]; then
-              echo "ERROR: $d exists in kernel source tree"
-              exit 1
+              echo "[FAIL] Source-tree generated directory: $d"
+              FAILED=1
             fi
           done
 
-          echo "Source tree is clean of build artifacts."
+          if [ "${FAILED}" -ne 0 ]; then
+            echo
+            echo "Git status:"
+            git status --short || true
+
+            echo
+            echo "Source-tree generated files:"
+            find . \
+              -path './.git' -prune -o \
+              -type f \
+              \( \
+                -name '*.o' -o \
+                -name '*.cmd' -o \
+                -name '*.ko' -o \
+                -name 'Module.symvers' -o \
+                -name 'modules.order' \
+              \) \
+              -print \
+              | head -100
+
+            exit 1
+          fi
+
+          echo "[PASS] Kernel source tree contains no build artifacts"
+
+      # ============================================================
+      # Build kernel
+      # ============================================================
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
           export PATH="${CLANG_DIR}/bin:${PATH}"
 
@@ -526,12 +688,16 @@ jobs:
             Image.gz
 
       # ============================================================
-      # Verify
+      # Verify build
       # ============================================================
 
       - name: Verify kernel
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Verify kernel output"
+          echo "========================================"
 
           test -f "${OUT_DIR}/arch/arm64/boot/Image"
           test -f "${OUT_DIR}/arch/arm64/boot/Image.gz"
@@ -539,8 +705,11 @@ jobs:
           test -f "${OUT_DIR}/System.map"
           test -f "${OUT_DIR}/.config"
 
+          echo "[PASS] All required kernel outputs exist"
+
+          echo
           echo "========================================"
-          echo "Kernel build successful"
+          echo "Kernel artifacts"
           echo "========================================"
 
           ls -lh \
@@ -549,6 +718,7 @@ jobs:
             "${OUT_DIR}/vmlinux" \
             "${OUT_DIR}/System.map"
 
+          echo
           file \
             "${OUT_DIR}/arch/arm64/boot/Image" \
             "${OUT_DIR}/arch/arm64/boot/Image.gz"
@@ -559,8 +729,9 @@ jobs:
 
       - name: Package kernel
         run: |
-          set -e
+          set -euo pipefail
 
+          rm -rf kernel-artifact
           mkdir -p kernel-artifact
 
           cp \
@@ -617,6 +788,10 @@ jobs:
           tar -czf \
             resukisu-sm6115-kernel.tar.gz \
             -C kernel-artifact .
+
+          echo "========================================"
+          echo "Package"
+          echo "========================================"
 
           ls -lh resukisu-sm6115-kernel.tar.gz
 
