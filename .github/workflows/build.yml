@@ -353,105 +353,99 @@ jobs:
           echo "Source tree after cleanup:"
           ls -la .config Module.symvers System.map modules.order 2>/dev/null || true
 
-      - name: Configure kernel
-        working-directory: kernel
-        run: |
-          set -e
+            - name: Configure kernel
+              working-directory: kernel
+              run: |
+                set -e
 
-          export PATH="${CLANG_DIR}/bin:${PATH}"
+                export PATH="${CLANG_DIR}/bin:${PATH}"
+                export OUT_DIR="${GITHUB_WORKSPACE}/out"
 
-          echo "========================================"
-          echo "Base defconfig"
-          echo "========================================"
+                echo "========================================"
+                echo "Base defconfig"
+                echo "========================================"
 
-          make \
-            O="${OUT_DIR}" \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            vendor/bengal-perf_defconfig
+                make \
+                  O="${OUT_DIR}" \
+                  ARCH=arm64 \
+                  LLVM=1 \
+                  LLVM_IAS=1 \
+                 vendor/bengal-perf_defconfig
 
-          echo "========================================"
-          echo "Merge GTA4L configuration"
-          echo "========================================"
+                echo "========================================"
+                echo "Merge GTA4L configuration"
+                echo "========================================"
 
-          scripts/kconfig/merge_config.sh \
-            -m \
-            -O "${OUT_DIR}" \
-            "${OUT_DIR}/.config" \
-            arch/arm64/configs/vendor/gta4l-common.config
+                scripts/kconfig/merge_config.sh \
+                  -m \
+                  -O "${OUT_DIR}" \
+                  "${OUT_DIR}/.config" \
+                  arch/arm64/configs/vendor/gta4l-common.config
 
-          echo "========================================"
-          echo "Create ReSukiSU configuration"
-          echo "========================================"
+                echo "========================================"
+                echo "Create ReSukiSU configuration"
+                echo "========================================"
 
-          cat > "${OUT_DIR}/resukisu.config" <<'EOF'
-          CONFIG_KSU=y
-          # CONFIG_KSU_TRACEPOINT_HOOK is not set
-          CONFIG_KSU_MANUAL_HOOK=y
-          EOF
+                cat > "${OUT_DIR}/resukisu.config" <<'EOF'
+                CONFIG_KSU=y
+                # CONFIG_KSU_TRACEPOINT_HOOK is not set
+                CONFIG_KSU_MANUAL_HOOK=y
+                EOF
 
-          cat "${OUT_DIR}/resukisu.config"
+                cat "${OUT_DIR}/resukisu.config"
 
-          echo
-          echo "========================================"
-          echo "Apply ReSukiSU Kconfig"
-          echo "========================================"
+                echo
+                echo "========================================"
+                echo "Apply ReSukiSU Kconfig"
+                echo "========================================"
 
-          # IMPORTANT:
-          #
-          # No -m here.
-          #
-          # merge_config.sh must run Kconfig so that
-          # the manual-hook choice is actually resolved.
+                scripts/kconfig/merge_config.sh \
+                  -O "${OUT_DIR}" \
+                  "${OUT_DIR}/.config" \
+                  "${OUT_DIR}/resukisu.config"
 
-          scripts/kconfig/merge_config.sh \
-            -O "${OUT_DIR}" \
-            "${OUT_DIR}/.config" \
-            "${OUT_DIR}/resukisu.config"
+                echo
+                echo "========================================"
+                echo "Final KSU configuration"
+                echo "========================================"
 
-          echo
-          echo "========================================"
-          echo "Final KSU configuration"
-          echo "========================================"
+                grep '^CONFIG_KSU' \
+                  "${OUT_DIR}/.config" || true
 
-          grep '^CONFIG_KSU' \
-            "${OUT_DIR}/.config" || true
+                echo
+                echo "========================================"
+                echo "Validate KSU configuration"
+                echo "========================================"
 
-          echo
-          echo "========================================"
-          echo "Validate KSU configuration"
-          echo "========================================"
+                KSU="$(sed -n \
+                  's/^CONFIG_KSU=//p' \
+                  "${OUT_DIR}/.config")"
 
-          KSU="$(sed -n \
-            's/^CONFIG_KSU=//p' \
-            "${OUT_DIR}/.config")"
+                MANUAL="$(sed -n \
+                  's/^CONFIG_KSU_MANUAL_HOOK=//p' \
+                  "${OUT_DIR}/.config")"
 
-          MANUAL="$(sed -n \
-            's/^CONFIG_KSU_MANUAL_HOOK=//p' \
-            "${OUT_DIR}/.config")"
+                if [ "$KSU" != "y" ]; then
+                  echo "[FAIL] CONFIG_KSU is not y"
+                  exit 1
+                fi
 
-          if [ "$KSU" != "y" ]; then
-            echo "[FAIL] CONFIG_KSU is not y"
-            exit 1
-          fi
+                if [ "$MANUAL" != "y" ]; then
+                  echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
+                  exit 1
+                fi
 
-          if [ "$MANUAL" != "y" ]; then
-            echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
-            exit 1
-          fi
+                if grep -q \
+                  '^CONFIG_KSU_TRACEPOINT_HOOK=y' \
+                  "${OUT_DIR}/.config"; then
 
-          if grep -q \
-            '^CONFIG_KSU_TRACEPOINT_HOOK=y' \
-            "${OUT_DIR}/.config"; then
+                  echo "[FAIL] Tracepoint hook is enabled"
+                  exit 1
+                fi
 
-            echo "[FAIL] Tracepoint hook is enabled"
-            exit 1
-          fi
-
-          echo "[PASS] CONFIG_KSU=y"
-          echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
-          echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
+                echo "[PASS] CONFIG_KSU=y"
+                echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
+                echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
 
       # ============================================================
       # Build
