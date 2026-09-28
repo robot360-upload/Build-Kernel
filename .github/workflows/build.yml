@@ -996,7 +996,7 @@ jobs:
 
           # The legacy ARM32 VDSO does not assemble correctly
           # with this LLVM/Clang build environment.
-          CONFIG_VDSO32=n
+          # CONFIG_VDSO32=n
           EOF
 
           echo "========================================"
@@ -1004,7 +1004,7 @@ jobs:
           echo "========================================"
 
           grep -E \
-            '^CONFIG_(KSU|COMPAT|VDSO32)' \
+            '^CONFIG_(KSU|COMPAT|COMPAT_VDSO)' \
             "${OUT_DIR}/gta4l.config" || true
 
           echo
