@@ -1,0 +1,962 @@
+name: Build ReSukiSU SM6115 Kernel - GTA4L
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ReSukiSU LineageOS SM6115 / GTA4L
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ============================================================
+      # HOST DEPENDENCIES
+      # ============================================================
+      - name: Install build dependencies
+        run: |
+          set -eux
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lz4 \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip
+
+      # ============================================================
+      # LINEAGEOS SM6115 KERNEL
+      # ============================================================
+      - name: Clone LineageOS SM6115 kernel
+        run: |
+          set -eux
+
+          mkdir -p kernel/samsung
+
+          git clone \
+            --depth=1 \
+            --branch lineage-23.2 \
+            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            kernel/samsung/sm6115
+
+          cd kernel/samsung/sm6115
+
+          echo "===== KERNEL REVISION ====="
+          git rev-parse HEAD
+
+          echo
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+      # ============================================================
+      # EXACT LINEAGEOS CLANG r416183b
+      # ============================================================
+      - name: Clone LineageOS Clang r416183b
+        run: |
+          set -eux
+
+          mkdir -p toolchain
+
+          git clone \
+            --depth=1 \
+            --branch lineage-20.0 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            toolchain/clang-r416183b
+
+          echo
+          echo "===== CLANG VERSION ====="
+
+          toolchain/clang-r416183b/bin/clang --version
+
+          echo
+          echo "===== LLD VERSION ====="
+
+          toolchain/clang-r416183b/bin/ld.lld --version
+
+      # ============================================================
+      # INSTALL RESUKISU
+      # ============================================================
+      - name: Install ReSukiSU
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "Clone ReSukiSU"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            https://github.com/ReSukiSU/ReSukiSU.git \
+            KernelSU
+
+          echo
+          echo "===== RESUKISU REVISION ====="
+
+          cd KernelSU
+          git rev-parse HEAD
+          cd ..
+
+          echo
+          echo "========================================"
+          echo "Create KernelSU driver symlink"
+          echo "========================================"
+
+          ln -s \
+            ../KernelSU/kernel \
+            drivers/kernelsu
+
+          echo
+          echo "===== VERIFY SYMLINK ====="
+
+          test -L drivers/kernelsu
+          test -e drivers/kernelsu/Kconfig
+          test -e drivers/kernelsu/Makefile
+
+          ls -l drivers/kernelsu
+
+          echo
+          echo "========================================"
+          echo "Register KernelSU in drivers/Kconfig"
+          echo "========================================"
+
+          if ! grep -q \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig; then
+
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          fi
+
+          echo
+          echo "========================================"
+          echo "Register KernelSU in drivers/Makefile"
+          echo "========================================"
+
+          if ! grep -q \
+            'obj-\$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile; then
+
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          fi
+
+          echo
+          echo "===== KERNELSU REGISTRATION ====="
+
+          grep -n \
+            'kernelsu' \
+            drivers/Kconfig \
+            drivers/Makefile
+
+      # ============================================================
+      # FORCE RESUKISU MANUAL-HOOK KCONFIG DEFAULT
+      #
+      # The KernelSU hooking method is a Kconfig choice.
+      # For this 4.19 kernel we explicitly make Manual Hook the
+      # default choice.
+      # ============================================================
+      - name: Configure ReSukiSU Kconfig default
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          KSU_KCONFIG="drivers/kernelsu/Kconfig"
+
+          echo "===== KERNELSU HOOKING CHOICE ====="
+
+          grep -n \
+            -A20 \
+            -B5 \
+            'choice' \
+            "${KSU_KCONFIG}" \
+            | head -80
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("drivers/kernelsu/Kconfig")
+          text = path.read_text()
+
+          old = "default KSU_TRACEPOINT_HOOK"
+          new = "default KSU_MANUAL_HOOK"
+
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit(
+                  "Could not find KernelSU hooking-method default"
+              )
+
+          path.write_text(text)
+          PY
+
+          echo
+          echo "===== VERIFY MANUAL-HOOK DEFAULT ====="
+
+          grep -n \
+            -A8 \
+            -B3 \
+            'default KSU_MANUAL_HOOK' \
+            "${KSU_KCONFIG}"
+
+      # ============================================================
+      # APPLY RESUKISU MANUAL HOOKS
+      #
+      # Required for this old non-GKI 4.19 kernel.
+      # ============================================================
+      - name: Apply ReSukiSU manual hooks
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def insert_once(text, marker, insertion, description):
+              if insertion.strip() in text:
+                  print(f"[SKIP] {description} already present")
+                  return text
+
+              pos = text.find(marker)
+
+              if pos < 0:
+                  raise RuntimeError(
+                      f"[FAIL] Could not find marker for {description}: {marker}"
+                  )
+
+              text = text[:pos] + insertion + text[pos:]
+              print(f"[PATCH] {description}")
+              return text
+
+          # ========================================================
+          # fs/exec.c
+          # ========================================================
+
+          path = "fs/exec.c"
+          text = read(path)
+
+          exec_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                          void *argv, void *envp, int *flags);
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                          void *argv, void *envp, int *flags, int *retval);
+          #endif
+
+          '''
+
+          if "ksu_handle_execveat" not in text:
+              marker = "static int do_execveat_common("
+              text = insert_once(
+                  text,
+                  marker,
+                  exec_decl,
+                  "execveat declarations"
+              )
+
+          # Replace the actual return in do_execveat_common.
+          #
+          # We deliberately scope this to the function instead of doing
+          # a global replacement of __do_execve_file().
+          if "ksu_handle_post_execveat" not in text:
+              pattern = re.compile(
+                  r"(static int do_execveat_common\(.*?\n)"
+                  r"(.*?\n)"
+                  r"(\s*)return __do_execve_file\(fd, filename, argv, envp, flags, NULL\);",
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate do_execveat_common return"
+                  )
+
+              prefix = match.group(1)
+              body = match.group(2)
+              indent = match.group(3)
+
+              replacement = (
+                  prefix +
+                  body +
+                  indent + "#ifdef CONFIG_KSU_MANUAL_HOOK\n" +
+                  indent + "    int retval;\n" +
+                  indent + "    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n" +
+                  indent + "    retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n" +
+                  indent + "    ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n" +
+                  indent + "    return retval;\n" +
+                  indent + "#else\n" +
+                  indent + "    return __do_execve_file(fd, filename, argv, envp, flags, NULL);\n" +
+                  indent + "#endif"
+              )
+
+              text = text[:match.start()] + replacement + text[match.end():]
+
+          write(path, text)
+
+          # ========================================================
+          # fs/stat.c
+          # ========================================================
+
+          path = "fs/stat.c"
+          text = read(path)
+
+          stat_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+          extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
+          #endif
+          #endif
+
+          '''
+
+          if "ksu_handle_stat" not in text:
+              marker = "SYSCALL_DEFINE4(newfstatat"
+              text = insert_once(
+                  text,
+                  marker,
+                  stat_decl,
+                  "stat declarations"
+              )
+
+          # newfstatat
+          if "ksu_handle_stat(&dfd, &filename, &flag)" not in text:
+              pattern = re.compile(
+                  r"(SYSCALL_DEFINE4\(newfstatat.*?\{)"
+                  r"(.*?)"
+                  r"(\n\})",
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate newfstatat"
+                  )
+
+              body = match.group(2)
+
+              # Insert after the first local variable section.
+              lines = body.splitlines(True)
+
+              insert_at = 0
+
+              while insert_at < len(lines):
+                  line = lines[insert_at]
+
+                  if line.strip().startswith(
+                      ("struct ", "unsigned ", "int ", "const ", "char ")
+                  ):
+                      insert_at += 1
+                  else:
+                      break
+
+              hook = (
+                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "    ksu_handle_stat(&dfd, &filename, &flag);\n"
+                  "#endif\n"
+              )
+
+              lines.insert(insert_at, hook)
+              body = "".join(lines)
+
+              text = (
+                  text[:match.start(2)] +
+                  body +
+                  text[match.end(2):]
+              )
+
+          # fstat return hook
+          if "ksu_handle_newfstat_ret(&fd, &statbuf)" not in text:
+              pattern = re.compile(
+                  r"(SYSCALL_DEFINE2\(newfstat.*?\{)"
+                  r"(.*?)"
+                  r"(\n\})",
+                  re.S
+              )
+
+              match = pattern.search(text)
+
+              if not match:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate newfstat"
+                  )
+
+              body = match.group(2)
+
+              ret_match = re.search(
+                  r"(\n\s*return\s+[^;]+;)",
+                  body
+              )
+
+              if not ret_match:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate newfstat return"
+                  )
+
+              hook = (
+                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "    ksu_handle_newfstat_ret(&fd, &statbuf);\n"
+                  "#endif"
+              )
+
+              body = (
+                  body[:ret_match.start()] +
+                  hook +
+                  body[ret_match.start():]
+              )
+
+              text = (
+                  text[:match.start(2)] +
+                  body +
+                  text[match.end(2):]
+              )
+
+          write(path, text)
+
+          # ========================================================
+          # fs/open.c
+          # ========================================================
+
+          path = "fs/open.c"
+          text = read(path)
+
+          faccess_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(int *dfd,
+                          const char __user **filename_user,
+                          int *mode, int *flags);
+          #endif
+
+          '''
+
+          if "ksu_handle_faccessat" not in text:
+              marker = "SYSCALL_DEFINE3(faccessat"
+              text = insert_once(
+                  text,
+                  marker,
+                  faccess_decl,
+                  "faccessat declaration"
+              )
+
+          if "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)" not in text:
+              marker = "SYSCALL_DEFINE3(faccessat"
+              pos = text.find(marker)
+
+              if pos < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate faccessat"
+                  )
+
+              brace = text.find("{", pos)
+
+              if brace < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate faccessat body"
+                  )
+
+              hook = (
+                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+                  "#endif\n"
+              )
+
+              text = text[:brace + 1] + hook + text[brace + 1:]
+
+          write(path, text)
+
+          # ========================================================
+          # kernel/reboot.c
+          # ========================================================
+
+          path = "kernel/reboot.c"
+          text = read(path)
+
+          reboot_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern int ksu_handle_sys_reboot(int magic1, int magic2,
+                                           unsigned int cmd,
+                                           void __user **arg);
+          #endif
+
+          '''
+
+          if "ksu_handle_sys_reboot" not in text:
+              marker = "SYSCALL_DEFINE4(reboot"
+              text = insert_once(
+                  text,
+                  marker,
+                  reboot_decl,
+                  "sys_reboot declaration"
+              )
+
+          if "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)" not in text:
+              marker = "SYSCALL_DEFINE4(reboot"
+              pos = text.find(marker)
+
+              if pos < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate reboot syscall"
+                  )
+
+              brace = text.find("{", pos)
+
+              if brace < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate reboot body"
+                  )
+
+              hook = (
+                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "    ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+                  "#endif\n"
+              )
+
+              text = text[:brace + 1] + hook + text[brace + 1:]
+
+          write(path, text)
+
+          # ========================================================
+          # fs/read_write.c
+          # ========================================================
+
+          path = "fs/read_write.c"
+          text = read(path)
+
+          read_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern bool ksu_init_rc_hook __read_mostly;
+          extern __attribute__((cold)) int ksu_handle_sys_read(
+                          unsigned int fd,
+                          char __user **buf_ptr,
+                          size_t *count_ptr);
+          #endif
+
+          '''
+
+          if "ksu_handle_sys_read" not in text:
+              marker = "SYSCALL_DEFINE3(read"
+              text = insert_once(
+                  text,
+                  marker,
+                  read_decl,
+                  "sys_read declarations"
+              )
+
+          if "ksu_handle_sys_read(fd, &buf, &count)" not in text:
+              marker = "SYSCALL_DEFINE3(read"
+              pos = text.find(marker)
+
+              if pos < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate read syscall"
+                  )
+
+              brace = text.find("{", pos)
+
+              if brace < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate read body"
+                  )
+
+              hook = (
+                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "    if (unlikely(ksu_init_rc_hook))\n"
+                  "        ksu_handle_sys_read(fd, &buf, &count);\n"
+                  "#endif\n"
+              )
+
+              text = text[:brace + 1] + hook + text[brace + 1:]
+
+          write(path, text)
+
+          print()
+          print("========================================")
+          print("Manual hook patching complete")
+          print("========================================")
+          PY
+
+      # ============================================================
+      # VERIFY REQUIRED MANUAL HOOKS
+      # ============================================================
+      - name: Verify ReSukiSU manual hooks
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          echo "===== REQUIRED RESUKISU HOOKS ====="
+
+          grep -Rns \
+            'ksu_handle_execveat' \
+            fs/exec.c
+
+          grep -Rns \
+            'ksu_handle_stat' \
+            fs/stat.c
+
+          grep -Rns \
+            'ksu_handle_faccessat' \
+            fs/open.c
+
+          grep -Rns \
+            'ksu_handle_sys_reboot' \
+            kernel/reboot.c
+
+          grep -Rns \
+            'ksu_handle_sys_read' \
+            fs/read_write.c
+
+          echo
+          echo "[PASS] Required ReSukiSU manual hooks are present"
+
+      # ============================================================
+      # CONFIGURATION
+      #
+      # IMPORTANT:
+      # This intentionally follows the exact configuration pipeline
+      # used by the previously successful vanilla kernel:
+      #
+      #   defconfig
+      #       ↓
+      #   merge_config.sh
+      #       ↓
+      #   GTA4L fragment
+      #       ↓
+      #   ReSukiSU fragment
+      #       ↓
+      #   olddefconfig
+      #
+      # Do NOT use KCONFIG_ALLCONFIG/alldefconfig here.
+      # ============================================================
+      - name: Configure GTA4L + ReSukiSU
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/toolchain/clang-r416183b/bin"
+          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
+
+          rm -rf out
+          mkdir -p out
+
+          echo "========================================"
+          echo "TOOLCHAIN CHECK"
+          echo "========================================"
+
+          command -v clang
+          clang --version
+
+          command -v ld.lld
+          ld.lld --version
+
+          echo
+          echo "========================================"
+          echo "VERIFY GTA4L CONFIG FILES"
+          echo "========================================"
+
+          test -f arch/arm64/configs/vendor/bengal-perf_defconfig
+          test -f arch/arm64/configs/vendor/gta4l-common.config
+
+          echo "[PASS] bengal-perf_defconfig"
+          echo "[PASS] gta4l-common.config"
+
+          echo
+          echo "========================================"
+          echo "CREATE BASE CONFIG"
+          echo "========================================"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          echo
+          echo "========================================"
+          echo "MERGE GTA4L FRAGMENT"
+          echo "========================================"
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+              -m \
+              -r \
+              -O out \
+              out/.config \
+              arch/arm64/configs/vendor/gta4l-common.config
+
+          echo
+          echo "========================================"
+          echo "CREATE RESUKISU FRAGMENT"
+          echo "========================================"
+
+          cat > out/resukisu.config <<'EOF'
+
+          # ReSukiSU
+          CONFIG_KSU=y
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_MANUAL_HOOK=y
+          EOF
+
+          cat out/resukisu.config
+
+          echo
+          echo "========================================"
+          echo "MERGE RESUKISU FRAGMENT"
+          echo "========================================"
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+              -m \
+              -r \
+              -O out \
+              out/.config \
+              out/resukisu.config
+
+          echo
+          echo "========================================"
+          echo "FINALIZE CONFIG"
+          echo "========================================"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "========================================"
+          echo "VERIFY CRITICAL OPTIONS"
+          echo "========================================"
+
+          test "$(grep -c '^CONFIG_COMPAT=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_MODULES=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_LTO_CLANG=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_CFI_CLANG=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_SHADOW_CALL_STACK=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_GTA4L_DTB=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KERNEL_GZIP=y$' out/.config)" -eq 1
+
+          test "$(grep -c '^CONFIG_KSU=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config)" -eq 1
+
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config; then
+            echo "[FAIL] Tracepoint hook is enabled"
+            exit 1
+          fi
+
+          echo
+          echo "===== VERIFIED CONFIG ====="
+
+          grep -E \
+            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB|CONFIG_KERNEL_GZIP|CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK)=' \
+            out/.config
+
+          echo
+          echo "===== CONFIG COMPLETE ====="
+
+      # ============================================================
+      # BUILD
+      # ============================================================
+      - name: Build ReSukiSU kernel
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/toolchain/clang-r416183b/bin"
+          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
+
+          echo "========================================"
+          echo "FINAL COMPILER"
+          echo "========================================"
+
+          command -v clang
+          clang --version
+
+          echo
+          echo "========================================"
+          echo "BUILD RAW IMAGE + COMPRESSED IMAGE"
+          echo "========================================"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc)" \
+            Image Image.gz
+
+      # ============================================================
+      # VERIFY OUTPUT
+      # ============================================================
+      - name: Verify kernel artifacts
+        working-directory: kernel/samsung/sm6115
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "BOOT DIRECTORY"
+          echo "========================================"
+
+          find out/arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort
+
+          echo
+          echo "========================================"
+          echo "REQUIRED FILES"
+          echo "========================================"
+
+          test -f out/arch/arm64/boot/Image
+          test -f out/arch/arm64/boot/Image.gz
+          test -f out/vmlinux
+          test -f out/System.map
+          test -f out/.config
+
+          echo
+          echo "===== RAW IMAGE ====="
+
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+
+          echo
+          echo "===== COMPRESSED IMAGE ====="
+
+          file out/arch/arm64/boot/Image.gz
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== VMLINUX ====="
+
+          ls -lh out/vmlinux
+
+          echo
+          echo "===== SYSTEM MAP ====="
+
+          ls -lh out/System.map
+
+          echo
+          echo "===== FINAL CONFIG HASH ====="
+
+          sha256sum out/.config
+
+          echo
+          echo "===== RAW KERNEL HASH ====="
+
+          sha256sum out/arch/arm64/boot/Image
+
+          echo
+          echo "===== COMPRESSED KERNEL HASH ====="
+
+          sha256sum out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== RAW IMAGE HEADER ====="
+
+          xxd -l 16 out/arch/arm64/boot/Image
+
+          echo
+          echo "===== GZIP HEADER ====="
+
+          xxd -l 16 out/arch/arm64/boot/Image.gz
+
+      # ============================================================
+      # PACKAGE ARTIFACTS
+      # ============================================================
+      - name: Prepare artifacts
+        run: |
+          set -eux
+
+          mkdir -p artifacts
+
+          cp \
+            kernel/samsung/sm6115/out/arch/arm64/boot/Image \
+            artifacts/Image
+
+          cp \
+            kernel/samsung/sm6115/out/arch/arm64/boot/Image.gz \
+            artifacts/Image.gz
+
+          cp \
+            kernel/samsung/sm6115/out/.config \
+            artifacts/gta4l-resukisu.config
+
+          cp \
+            kernel/samsung/sm6115/out/System.map \
+            artifacts/System.map
+
+          cp \
+            kernel/samsung/sm6115/out/vmlinux \
+            artifacts/vmlinux
+
+          cp \
+            kernel/samsung/sm6115/arch/arm64/configs/vendor/bengal-perf_defconfig \
+            artifacts/bengal-perf_defconfig
+
+          cp \
+            kernel/samsung/sm6115/arch/arm64/configs/vendor/gta4l-common.config \
+            artifacts/gta4l-common.config
+
+          cp \
+            kernel/samsung/sm6115/out/resukisu.config \
+            artifacts/resukisu.config
+
+          echo
+          echo "========================================"
+          echo "ARTIFACTS"
+          echo "========================================"
+
+          ls -lh artifacts/
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+      - name: Upload ReSukiSU kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta4l-resukisu-kernel
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
