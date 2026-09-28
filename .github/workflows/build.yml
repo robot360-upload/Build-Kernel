@@ -1052,12 +1052,6 @@ jobs:
               "${OUT_DIR}/.config"
           )"
 
-          VDSO32="$(
-            sed -n \
-              's/^CONFIG_VDSO32=//p' \
-              "${OUT_DIR}/.config"
-          )"
-
           if [ "$KSU" != "y" ]; then
             echo "[FAIL] CONFIG_KSU is not y"
             exit 1
@@ -1081,11 +1075,11 @@ jobs:
             exit 1
           fi
 
-          if [ "$VDSO32" != "n" ] && \
-             ! grep -q '^# CONFIG_VDSO32 is not set' \
-             "${OUT_DIR}/.config"; then
+          if grep -q \
+            '^CONFIG_COMPAT_VDSO=y' \
+            "${OUT_DIR}/.config"; then
 
-            echo "[FAIL] CONFIG_VDSO32 was not disabled"
+            echo "[FAIL] CONFIG_COMPAT_VDSO=y"
             exit 1
           fi
 
@@ -1093,7 +1087,12 @@ jobs:
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
           echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
           echo "[PASS] CONFIG_COMPAT=y"
-          echo "[PASS] CONFIG_VDSO32 disabled"
+          echo "[PASS] CONFIG_COMPAT_VDSO disabled"
+
+          echo
+          echo "========================================"
+          echo "Final configuration validation passed"
+          echo "========================================"
 
           echo
           echo "========================================"
