@@ -122,14 +122,11 @@ jobs:
             ../KernelSU/kernel \
             drivers/kernelsu
 
-          echo
-          echo "===== VERIFY SYMLINK ====="
-
           test -L drivers/kernelsu
           test -e drivers/kernelsu/Kconfig
           test -e drivers/kernelsu/Makefile
 
-          ls -l drivers/kernelsu
+          echo "[PASS] drivers/kernelsu symlink"
 
           echo
           echo "========================================"
@@ -165,10 +162,6 @@ jobs:
 
       # ============================================================
       # FORCE RESUKISU MANUAL-HOOK KCONFIG DEFAULT
-      #
-      # The KernelSU hooking method is a Kconfig choice.
-      # For this 4.19 kernel we explicitly make Manual Hook the
-      # default choice.
       # ============================================================
       - name: Configure ReSukiSU Kconfig default
         working-directory: kernel/samsung/sm6115
@@ -176,15 +169,6 @@ jobs:
           set -eux
 
           KSU_KCONFIG="drivers/kernelsu/Kconfig"
-
-          echo "===== KERNELSU HOOKING CHOICE ====="
-
-          grep -n \
-            -A20 \
-            -B5 \
-            'choice' \
-            "${KSU_KCONFIG}" \
-            | head -80
 
           python3 - <<'PY'
           from pathlib import Path
@@ -199,14 +183,13 @@ jobs:
               text = text.replace(old, new, 1)
           elif new not in text:
               raise SystemExit(
-                  "Could not find KernelSU hooking-method default"
+                  "[FAIL] Could not find KernelSU hooking-method default"
               )
 
           path.write_text(text)
-          PY
 
-          echo
-          echo "===== VERIFY MANUAL-HOOK DEFAULT ====="
+          print("[PASS] Manual Hook is the Kconfig default")
+          PY
 
           grep -n \
             -A8 \
@@ -217,7 +200,17 @@ jobs:
       # ============================================================
       # APPLY RESUKISU MANUAL HOOKS
       #
-      # Required for this old non-GKI 4.19 kernel.
+      # Linux 4.19:
+      #
+      #   fs/exec.c
+      #   fs/stat.c
+      #   fs/open.c
+      #   fs/read_write.c
+      #   kernel/reboot.c
+      #
+      # The hook statements are deliberately placed AFTER existing
+      # local declarations to satisfy this kernel's C90 warning
+      # policy (-Werror,-Wdeclaration-after-statement).
       # ============================================================
       - name: Apply ReSukiSU manual hooks
         working-directory: kernel/samsung/sm6115
@@ -234,21 +227,11 @@ jobs:
           def write(path, text):
               Path(path).write_text(text)
 
-          def insert_once(text, marker, insertion, description):
-              if insertion.strip() in text:
-                  print(f"[SKIP] {description} already present")
-                  return text
-
-              pos = text.find(marker)
-
-              if pos < 0:
+          def require(text, needle, description):
+              if needle not in text:
                   raise RuntimeError(
-                      f"[FAIL] Could not find marker for {description}: {marker}"
+                      f"[FAIL] Missing {description}: {needle}"
                   )
-
-              text = text[:pos] + insertion + text[pos:]
-              print(f"[PATCH] {description}")
-              return text
 
           # ========================================================
           # fs/exec.c
@@ -257,7 +240,7 @@ jobs:
           path = "fs/exec.c"
           text = read(path)
 
-          exec_decl = r'''
+          exec_decl = """\
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
           extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
@@ -267,55 +250,77 @@ jobs:
                           void *argv, void *envp, int *flags, int *retval);
           #endif
 
-          '''
+          """
 
           if "ksu_handle_execveat" not in text:
               marker = "static int do_execveat_common("
-              text = insert_once(
-                  text,
-                  marker,
-                  exec_decl,
-                  "execveat declarations"
-              )
+              pos = text.find(marker)
 
-          # Replace the actual return in do_execveat_common.
-          #
-          # We deliberately scope this to the function instead of doing
-          # a global replacement of __do_execve_file().
-          if "ksu_handle_post_execveat" not in text:
-              pattern = re.compile(
-                  r"(static int do_execveat_common\(.*?\n)"
-                  r"(.*?\n)"
-                  r"(\s*)return __do_execve_file\(fd, filename, argv, envp, flags, NULL\);",
-                  re.S
-              )
-
-              match = pattern.search(text)
-
-              if not match:
+              if pos < 0:
                   raise RuntimeError(
-                      "[FAIL] Could not locate do_execveat_common return"
+                      "[FAIL] Could not locate do_execveat_common"
                   )
 
-              prefix = match.group(1)
-              body = match.group(2)
-              indent = match.group(3)
+              text = text[:pos] + exec_decl + text[pos:]
 
-              replacement = (
-                  prefix +
-                  body +
-                  indent + "#ifdef CONFIG_KSU_MANUAL_HOOK\n" +
-                  indent + "    int retval;\n" +
-                  indent + "    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n" +
-                  indent + "    retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n" +
-                  indent + "    ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n" +
-                  indent + "    return retval;\n" +
-                  indent + "#else\n" +
-                  indent + "    return __do_execve_file(fd, filename, argv, envp, flags, NULL);\n" +
-                  indent + "#endif"
+          # Patch the exact 4.19 do_execveat_common body.
+          old = """\
+          {
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          }
+          """
+
+          new = """\
+          {
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              int retval;
+
+              ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+
+              retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+
+              ksu_handle_post_execveat(
+                  &fd, &filename, &argv, &envp, &flags, &retval);
+
+              return retval;
+          #else
+              return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          #endif
+          }
+          """
+
+          if "ksu_handle_post_execveat" not in text:
+              pos = text.find("static int do_execveat_common(")
+
+              if pos < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate do_execveat_common"
+                  )
+
+              end = text.find(
+                  "\n}\n",
+                  text.find("{", pos)
               )
 
-              text = text[:match.start()] + replacement + text[match.end():]
+              if end < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate do_execveat_common end"
+                  )
+
+              body = text[pos:end + 3]
+
+              if old not in body:
+                  raise RuntimeError(
+                      "[FAIL] Unexpected do_execveat_common body"
+                  )
+
+              body = body.replace(old, new, 1)
+
+              text = (
+                  text[:pos] +
+                  body +
+                  text[end + 3:]
+              )
 
           write(path, text)
 
@@ -326,120 +331,223 @@ jobs:
           path = "fs/stat.c"
           text = read(path)
 
-          stat_decl = r'''
+          stat_decl = """\
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
-          extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-          extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
+          extern int ksu_handle_stat(int *dfd,
+                          const char __user **filename_user,
+                          int *flags);
+
+          extern void ksu_handle_newfstat_ret(
+                          unsigned int *fd,
+                          struct stat __user **statbuf_ptr);
+
           #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
-          extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
+          extern void ksu_handle_fstat64_ret(
+                          unsigned long *fd,
+                          struct stat64 __user **statbuf_ptr);
           #endif
           #endif
 
-          '''
+          """
 
           if "ksu_handle_stat" not in text:
               marker = "SYSCALL_DEFINE4(newfstatat"
-              text = insert_once(
-                  text,
-                  marker,
-                  stat_decl,
-                  "stat declarations"
-              )
+              pos = text.find(marker)
 
-          # newfstatat
-          if "ksu_handle_stat(&dfd, &filename, &flag)" not in text:
-              pattern = re.compile(
-                  r"(SYSCALL_DEFINE4\(newfstatat.*?\{)"
-                  r"(.*?)"
-                  r"(\n\})",
-                  re.S
-              )
-
-              match = pattern.search(text)
-
-              if not match:
+              if pos < 0:
                   raise RuntimeError(
                       "[FAIL] Could not locate newfstatat"
                   )
 
-              body = match.group(2)
+              text = text[:pos] + stat_decl + text[pos:]
 
-              # Insert after the first local variable section.
-              lines = body.splitlines(True)
+          # --------------------------------------------------------
+          # newfstatat
+          # --------------------------------------------------------
 
-              insert_at = 0
+          if "ksu_handle_stat(&dfd, &filename, &flag)" not in text:
+              marker = "SYSCALL_DEFINE4(newfstatat"
+              start = text.find(marker)
+              brace = text.find("{", start)
+              end = text.find("\n}", brace)
 
-              while insert_at < len(lines):
-                  line = lines[insert_at]
+              if start < 0 or brace < 0 or end < 0:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate newfstatat body"
+                  )
 
-                  if line.strip().startswith(
-                      ("struct ", "unsigned ", "int ", "const ", "char ")
-                  ):
-                      insert_at += 1
-                  else:
-                      break
+              body = text[brace + 1:end]
 
-              hook = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_stat(&dfd, &filename, &flag);\n"
-                  "#endif\n"
+              needle = """\
+              struct kstat stat;
+              int error;
+              """
+
+              if needle not in body:
+                  raise RuntimeError(
+                      "[FAIL] Unexpected newfstatat declarations"
+                  )
+
+              replacement = needle + """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+              """
+
+              body = body.replace(
+                  needle,
+                  replacement,
+                  1
               )
-
-              lines.insert(insert_at, hook)
-              body = "".join(lines)
 
               text = (
-                  text[:match.start(2)] +
+                  text[:brace + 1] +
                   body +
-                  text[match.end(2):]
+                  text[end:]
               )
 
-          # fstat return hook
+          # --------------------------------------------------------
+          # fstatat64
+          # --------------------------------------------------------
+
+          if "ksu_handle_stat(&dfd, &filename, &flag)" in text:
+              marker = "SYSCALL_DEFINE4(fstatat64"
+
+              if marker in text and text.count(
+                  "ksu_handle_stat(&dfd, &filename, &flag)"
+              ) < 2:
+
+                  start = text.find(marker)
+                  brace = text.find("{", start)
+                  end = text.find("\n}", brace)
+
+                  if start < 0 or brace < 0 or end < 0:
+                      raise RuntimeError(
+                          "[FAIL] Could not locate fstatat64 body"
+                      )
+
+                  body = text[brace + 1:end]
+
+                  needle = """\
+              struct kstat stat;
+              int error;
+              """
+
+                  if needle not in body:
+                      raise RuntimeError(
+                          "[FAIL] Unexpected fstatat64 declarations"
+                      )
+
+                  replacement = needle + """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+              """
+
+                  body = body.replace(
+                      needle,
+                      replacement,
+                      1
+                  )
+
+                  text = (
+                      text[:brace + 1] +
+                      body +
+                      text[end:]
+                  )
+
+          # --------------------------------------------------------
+          # newfstat return hook
+          # --------------------------------------------------------
+
           if "ksu_handle_newfstat_ret(&fd, &statbuf)" not in text:
-              pattern = re.compile(
-                  r"(SYSCALL_DEFINE2\(newfstat.*?\{)"
-                  r"(.*?)"
-                  r"(\n\})",
-                  re.S
-              )
+              marker = "SYSCALL_DEFINE2(newfstat"
+              start = text.find(marker)
+              brace = text.find("{", start)
+              end = text.find("\n}", brace)
 
-              match = pattern.search(text)
-
-              if not match:
+              if start < 0 or brace < 0 or end < 0:
                   raise RuntimeError(
                       "[FAIL] Could not locate newfstat"
                   )
 
-              body = match.group(2)
+              body = text[brace + 1:end]
 
-              ret_match = re.search(
-                  r"(\n\s*return\s+[^;]+;)",
-                  body
-              )
+              needle = """
+              return error;
+              """
 
-              if not ret_match:
+              if needle not in body:
                   raise RuntimeError(
                       "[FAIL] Could not locate newfstat return"
                   )
 
-              hook = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_newfstat_ret(&fd, &statbuf);\n"
-                  "#endif"
-              )
+              replacement = """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_newfstat_ret(&fd, &statbuf);
+          #endif
+              return error;
+              """
 
-              body = (
-                  body[:ret_match.start()] +
-                  hook +
-                  body[ret_match.start():]
+              body = body.replace(
+                  needle,
+                  replacement,
+                  1
               )
 
               text = (
-                  text[:match.start(2)] +
+                  text[:brace + 1] +
                   body +
-                  text[match.end(2):]
+                  text[end:]
               )
+
+          # --------------------------------------------------------
+          # fstat64 return hook
+          # --------------------------------------------------------
+
+          if "ksu_handle_fstat64_ret(&fd, &statbuf)" not in text:
+              marker = "SYSCALL_DEFINE2(fstat64"
+
+              if marker in text:
+                  start = text.find(marker)
+                  brace = text.find("{", start)
+                  end = text.find("\n}", brace)
+
+                  if start < 0 or brace < 0 or end < 0:
+                      raise RuntimeError(
+                          "[FAIL] Could not locate fstat64"
+                      )
+
+                  body = text[brace + 1:end]
+
+                  needle = """
+              return error;
+                  """
+
+                  if needle not in body:
+                      raise RuntimeError(
+                          "[FAIL] Could not locate fstat64 return"
+                      )
+
+                  replacement = """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_fstat64_ret(&fd, &statbuf);
+          #endif
+              return error;
+                  """
+
+                  body = body.replace(
+                      needle,
+                      replacement,
+                      1
+                  )
+
+                  text = (
+                      text[:brace + 1] +
+                      body +
+                      text[end:]
+                  )
 
           write(path, text)
 
@@ -450,26 +558,19 @@ jobs:
           path = "fs/open.c"
           text = read(path)
 
-          faccess_decl = r'''
+          faccess_decl = """\
           #ifdef CONFIG_KSU_MANUAL_HOOK
           __attribute__((hot))
-          extern int ksu_handle_faccessat(int *dfd,
+          extern int ksu_handle_faccessat(
+                          int *dfd,
                           const char __user **filename_user,
-                          int *mode, int *flags);
+                          int *mode,
+                          int *flags);
           #endif
 
-          '''
+          """
 
           if "ksu_handle_faccessat" not in text:
-              marker = "SYSCALL_DEFINE3(faccessat"
-              text = insert_once(
-                  text,
-                  marker,
-                  faccess_decl,
-                  "faccessat declaration"
-              )
-
-          if "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)" not in text:
               marker = "SYSCALL_DEFINE3(faccessat"
               pos = text.find(marker)
 
@@ -478,20 +579,25 @@ jobs:
                       "[FAIL] Could not locate faccessat"
                   )
 
-              brace = text.find("{", pos)
+              text = text[:pos] + faccess_decl + text[pos:]
 
-              if brace < 0:
+          if "ksu_handle_faccessat(&dfd, &filename, &mode, NULL)" not in text:
+              marker = "SYSCALL_DEFINE3(faccessat"
+              start = text.find(marker)
+              brace = text.find("{", start)
+
+              if start < 0 or brace < 0:
                   raise RuntimeError(
                       "[FAIL] Could not locate faccessat body"
                   )
 
-              hook = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-                  "#endif\n"
-              )
+              hook = """\
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif
+          """
 
-              text = text[:brace + 1] + hook + text[brace + 1:]
+              text = text[:brace + 1] + "\n" + hook + text[brace + 1:]
 
           write(path, text)
 
@@ -502,25 +608,18 @@ jobs:
           path = "kernel/reboot.c"
           text = read(path)
 
-          reboot_decl = r'''
+          reboot_decl = """\
           #ifdef CONFIG_KSU_MANUAL_HOOK
-          extern int ksu_handle_sys_reboot(int magic1, int magic2,
-                                           unsigned int cmd,
-                                           void __user **arg);
+          extern int ksu_handle_sys_reboot(
+                          int magic1,
+                          int magic2,
+                          unsigned int cmd,
+                          void __user **arg);
           #endif
 
-          '''
+          """
 
           if "ksu_handle_sys_reboot" not in text:
-              marker = "SYSCALL_DEFINE4(reboot"
-              text = insert_once(
-                  text,
-                  marker,
-                  reboot_decl,
-                  "sys_reboot declaration"
-              )
-
-          if "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)" not in text:
               marker = "SYSCALL_DEFINE4(reboot"
               pos = text.find(marker)
 
@@ -529,20 +628,49 @@ jobs:
                       "[FAIL] Could not locate reboot syscall"
                   )
 
-              brace = text.find("{", pos)
+              text = text[:pos] + reboot_decl + text[pos:]
 
-              if brace < 0:
+          if "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg)" not in text:
+              marker = "SYSCALL_DEFINE4(reboot"
+              start = text.find(marker)
+              brace = text.find("{", start)
+              end = text.find("\n}", brace)
+
+              if start < 0 or brace < 0 or end < 0:
                   raise RuntimeError(
                       "[FAIL] Could not locate reboot body"
                   )
 
-              hook = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
-                  "#endif\n"
+              body = text[brace + 1:end]
+
+              needle = """\
+              struct pid_namespace *pid_ns = task_active_pid_ns(current);
+              char buffer[256];
+              int ret = 0;
+              """
+
+              if needle not in body:
+                  raise RuntimeError(
+                      "[FAIL] Unexpected reboot declarations"
+                  )
+
+              replacement = needle + """
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+          #endif
+              """
+
+              body = body.replace(
+                  needle,
+                  replacement,
+                  1
               )
 
-              text = text[:brace + 1] + hook + text[brace + 1:]
+              text = (
+                  text[:brace + 1] +
+                  body +
+                  text[end:]
+              )
 
           write(path, text)
 
@@ -553,7 +681,7 @@ jobs:
           path = "fs/read_write.c"
           text = read(path)
 
-          read_decl = r'''
+          read_decl = """\
           #ifdef CONFIG_KSU_MANUAL_HOOK
           extern bool ksu_init_rc_hook __read_mostly;
           extern __attribute__((cold)) int ksu_handle_sys_read(
@@ -562,18 +690,9 @@ jobs:
                           size_t *count_ptr);
           #endif
 
-          '''
+          """
 
           if "ksu_handle_sys_read" not in text:
-              marker = "SYSCALL_DEFINE3(read"
-              text = insert_once(
-                  text,
-                  marker,
-                  read_decl,
-                  "sys_read declarations"
-              )
-
-          if "ksu_handle_sys_read(fd, &buf, &count)" not in text:
               marker = "SYSCALL_DEFINE3(read"
               pos = text.find(marker)
 
@@ -582,21 +701,42 @@ jobs:
                       "[FAIL] Could not locate read syscall"
                   )
 
-              brace = text.find("{", pos)
+              text = text[:pos] + read_decl + text[pos:]
 
-              if brace < 0:
+          if "ksu_handle_sys_read(fd, &buf, &count)" not in text:
+              marker = "SYSCALL_DEFINE3(read"
+              start = text.find(marker)
+              brace = text.find("{", start)
+
+              if start < 0 or brace < 0:
                   raise RuntimeError(
                       "[FAIL] Could not locate read body"
                   )
 
-              hook = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                  "    if (unlikely(ksu_init_rc_hook))\n"
-                  "        ksu_handle_sys_read(fd, &buf, &count);\n"
-                  "#endif\n"
-              )
+              # For the 4.19+ version used here, read() directly calls
+              # ksys_read(), so the hook is safely placed first.
+              needle = "return ksys_read(fd, buf, count);"
 
-              text = text[:brace + 1] + hook + text[brace + 1:]
+              if needle not in text[brace:]:
+                  raise RuntimeError(
+                      "[FAIL] Could not locate ksys_read return"
+                  )
+
+              hook = """\
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+              if (unlikely(ksu_init_rc_hook))
+                  ksu_handle_sys_read(fd, &buf, &count);
+          #endif
+
+          """
+
+              return_pos = text.find(needle, brace)
+
+              text = (
+                  text[:return_pos] +
+                  hook +
+                  text[return_pos:]
+              )
 
           write(path, text)
 
@@ -607,56 +747,77 @@ jobs:
           PY
 
       # ============================================================
-      # VERIFY REQUIRED MANUAL HOOKS
+      # VERIFY MANUAL HOOKS
       # ============================================================
       - name: Verify ReSukiSU manual hooks
         working-directory: kernel/samsung/sm6115
         run: |
           set -eux
 
-          echo "===== REQUIRED RESUKISU HOOKS ====="
+          echo "===== EXECVE ====="
 
-          grep -Rns \
+          grep -n \
             'ksu_handle_execveat' \
             fs/exec.c
 
-          grep -Rns \
+          grep -n \
+            'ksu_handle_post_execveat' \
+            fs/exec.c
+
+          echo
+          echo "===== STAT ====="
+
+          grep -n \
             'ksu_handle_stat' \
             fs/stat.c
 
-          grep -Rns \
+          grep -n \
+            'ksu_handle_newfstat_ret' \
+            fs/stat.c
+
+          grep -n \
+            'ksu_handle_fstat64_ret' \
+            fs/stat.c
+
+          echo
+          echo "===== FACCESSAT ====="
+
+          grep -n \
             'ksu_handle_faccessat' \
             fs/open.c
 
-          grep -Rns \
+          echo
+          echo "===== REBOOT ====="
+
+          grep -n \
             'ksu_handle_sys_reboot' \
             kernel/reboot.c
 
-          grep -Rns \
+          echo
+          echo "===== READ ====="
+
+          grep -n \
             'ksu_handle_sys_read' \
             fs/read_write.c
 
           echo
-          echo "[PASS] Required ReSukiSU manual hooks are present"
+          echo "[PASS] Required manual-hook symbols present"
 
       # ============================================================
       # CONFIGURATION
       #
-      # IMPORTANT:
-      # This intentionally follows the exact configuration pipeline
-      # used by the previously successful vanilla kernel:
+      # Same successful pipeline as the vanilla build:
       #
-      #   defconfig
-      #       ↓
-      #   merge_config.sh
-      #       ↓
-      #   GTA4L fragment
-      #       ↓
-      #   ReSukiSU fragment
-      #       ↓
+      #   bengal-perf_defconfig
+      #        ↓
+      #   merge GTA4L config
+      #        ↓
+      #   merge ReSukiSU config
+      #        ↓
       #   olddefconfig
       #
-      # Do NOT use KCONFIG_ALLCONFIG/alldefconfig here.
+      # COMPAT remains enabled.
+      # COMPAT_VDSO is explicitly disabled.
       # ============================================================
       - name: Configure GTA4L + ReSukiSU
         working-directory: kernel/samsung/sm6115
@@ -721,7 +882,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "CREATE RESUKISU FRAGMENT"
+          echo "CREATE RESUKISU CONFIG"
           echo "========================================"
 
           cat > out/resukisu.config <<'EOF'
@@ -730,13 +891,24 @@ jobs:
           CONFIG_KSU=y
           # CONFIG_KSU_TRACEPOINT_HOOK is not set
           CONFIG_KSU_MANUAL_HOOK=y
+
+          # ========================================================
+          # Keep 32-bit userspace compatibility.
+          # Disable ONLY the 32-bit compat vDSO.
+          # ========================================================
+          CONFIG_COMPAT=y
+          # CONFIG_COMPAT_VDSO is not set
+          # CONFIG_VDSO32 is not set
           EOF
+
+          echo
+          echo "===== RESUKISU CONFIG FRAGMENT ====="
 
           cat out/resukisu.config
 
           echo
           echo "========================================"
-          echo "MERGE RESUKISU FRAGMENT"
+          echo "MERGE RESUKISU CONFIG"
           echo "========================================"
 
           KCONFIG_CONFIG="${PWD}/out/.config" \
@@ -761,6 +933,22 @@ jobs:
 
           echo
           echo "========================================"
+          echo "FINAL CONFIG"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_COMPAT|CONFIG_COMPAT_VDSO|CONFIG_VDSO32|CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_TRACEPOINT_HOOK)=' \
+            out/.config \
+            || true
+
+          echo
+          grep -E \
+            '^# CONFIG_(COMPAT_VDSO|VDSO32|KSU_TRACEPOINT_HOOK) is not set' \
+            out/.config \
+            || true
+
+          echo
+          echo "========================================"
           echo "VERIFY CRITICAL OPTIONS"
           echo "========================================"
 
@@ -777,16 +965,43 @@ jobs:
           test "$(grep -c '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config)" -eq 1
 
           if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config; then
-            echo "[FAIL] Tracepoint hook is enabled"
+            echo "[FAIL] CONFIG_KSU_TRACEPOINT_HOOK=y"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_COMPAT_VDSO=y$' out/.config; then
+            echo "[FAIL] CONFIG_COMPAT_VDSO=y"
+            echo "The 32-bit compat vDSO must be disabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_VDSO32=y$' out/.config; then
+            echo "[FAIL] CONFIG_VDSO32=y"
+            echo "The 32-bit vDSO must be disabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_COMPAT_VDSO=y' out/.config; then
+            echo "[FAIL] compat VDSO is still enabled"
             exit 1
           fi
 
           echo
-          echo "===== VERIFIED CONFIG ====="
+          echo "========================================"
+          echo "VERIFIED CONFIG"
+          echo "========================================"
 
           grep -E \
             '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_GTA4L_DTB|CONFIG_KERNEL_GZIP|CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK)=' \
             out/.config
+
+          echo
+          echo "===== VDSO SETTINGS ====="
+
+          grep -E \
+            '^(CONFIG_COMPAT_VDSO|CONFIG_VDSO32)=|^# CONFIG_(COMPAT_VDSO|VDSO32) is not set' \
+            out/.config \
+            || true
 
           echo
           echo "===== CONFIG COMPLETE ====="
@@ -812,6 +1027,9 @@ jobs:
 
           command -v clang
           clang --version
+
+          command -v ld.lld
+          ld.lld --version
 
           echo
           echo "========================================"
