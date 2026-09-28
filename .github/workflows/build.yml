@@ -980,17 +980,31 @@ jobs:
 
           cat >> "${OUT_DIR}/gta4l.config" <<'EOF'
 
+          # ========================================
           # ReSukiSU
+          # ========================================
+
           CONFIG_KSU=y
           # CONFIG_KSU_TRACEPOINT_HOOK is not set
           CONFIG_KSU_MANUAL_HOOK=y
+
+          # ========================================
+          # ARM32 compatibility
+          # ========================================
+
+          CONFIG_COMPAT=y
+
+          # The legacy ARM32 VDSO does not assemble correctly
+          # with this LLVM/Clang build environment.
+          CONFIG_VDSO32=n
           EOF
 
           echo "========================================"
           echo "Configuration fragment"
           echo "========================================"
 
-          grep '^CONFIG_KSU' \
+          grep -E \
+            '^CONFIG_(KSU|COMPAT|VDSO32)' \
             "${OUT_DIR}/gta4l.config" || true
 
           echo
@@ -1008,10 +1022,11 @@ jobs:
 
           echo
           echo "========================================"
-          echo "Final KSU configuration"
+          echo "Final kernel configuration"
           echo "========================================"
 
-          grep '^CONFIG_KSU' \
+          grep -E \
+            '^CONFIG_(KSU|COMPAT|VDSO32)' \
             "${OUT_DIR}/.config" || true
 
           echo
@@ -1028,6 +1043,18 @@ jobs:
           MANUAL="$(
             sed -n \
               's/^CONFIG_KSU_MANUAL_HOOK=//p' \
+              "${OUT_DIR}/.config"
+          )"
+
+          COMPAT="$(
+            sed -n \
+              's/^CONFIG_COMPAT=//p' \
+              "${OUT_DIR}/.config"
+          )"
+
+          VDSO32="$(
+            sed -n \
+              's/^CONFIG_VDSO32=//p' \
               "${OUT_DIR}/.config"
           )"
 
@@ -1049,9 +1076,29 @@ jobs:
             exit 1
           fi
 
+          if [ "$COMPAT" != "y" ]; then
+            echo "[FAIL] CONFIG_COMPAT is not y"
+            exit 1
+          fi
+
+          if [ "$VDSO32" != "n" ] && \
+             ! grep -q '^# CONFIG_VDSO32 is not set' \
+             "${OUT_DIR}/.config"; then
+
+            echo "[FAIL] CONFIG_VDSO32 was not disabled"
+            exit 1
+          fi
+
           echo "[PASS] CONFIG_KSU=y"
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
           echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
+          echo "[PASS] CONFIG_COMPAT=y"
+          echo "[PASS] CONFIG_VDSO32 disabled"
+
+          echo
+          echo "========================================"
+          echo "Final configuration validation passed"
+          echo "========================================"
 
       # ============================================================
       # Verify source tree BEFORE build
