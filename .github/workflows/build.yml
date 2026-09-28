@@ -59,17 +59,12 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
-          echo
           echo "========================================"
-          echo "Checking build tools"
+          echo "Build tools"
           echo "========================================"
 
           command -v make
-          make --version
-
           command -v python3
-          python3 --version
-
           command -v bc
           command -v bison
           command -v flex
@@ -91,22 +86,18 @@ jobs:
 
           cd "${KERNEL_DIR}"
 
-          echo
           echo "========================================"
           echo "Kernel repository"
           echo "========================================"
 
           git remote -v
 
-          echo
           echo "Branch:"
           git branch --show-current
 
-          echo
           echo "Commit:"
           git rev-parse HEAD
 
-          echo
           echo "Kernel version:"
           make kernelversion
 
@@ -125,7 +116,6 @@ jobs:
             "https://github.com/${CLANG_REPO}.git" \
             "${CLANG_DIR}"
 
-          echo
           echo "========================================"
           echo "Clang"
           echo "========================================"
@@ -134,8 +124,6 @@ jobs:
 
           test -x "${CLANG_DIR}/bin/clang"
           test -x "${CLANG_DIR}/bin/ld.lld"
-
-          echo "[PASS] LineageOS clang installed"
 
       # ============================================================
       # Verify source tree
@@ -146,62 +134,21 @@ jobs:
         run: |
           set -e
 
-          test -f fs/stat.c
-          test -f fs/exec.c
-          test -f fs/open.c
-          test -f fs/read_write.c
-          test -f kernel/reboot.c
+          for file in \
+            fs/stat.c \
+            fs/exec.c \
+            fs/open.c \
+            fs/read_write.c \
+            kernel/reboot.c \
+            arch/arm64/configs/vendor/bengal-perf_defconfig \
+            arch/arm64/configs/vendor/gta4l-common.config
+          do
+            test -f "$file"
+          done
 
-          test -f arch/arm64/configs/vendor/bengal-perf_defconfig
-          test -f arch/arm64/configs/vendor/gta4l-common.config
-
-          echo
           echo "[PASS] Expected kernel files exist"
 
-          echo
-          echo "========================================"
-          echo "Kernel version"
-          echo "========================================"
-
           make kernelversion
-
-          echo
-          echo "========================================"
-          echo "Relevant source functions"
-          echo "========================================"
-
-          echo
-          echo "--- fs/stat.c ---"
-          grep -nE \
-            'newfstatat|newfstat|fstat64|fstatat64' \
-            fs/stat.c || true
-
-          echo
-          echo "--- fs/exec.c ---"
-          grep -nE \
-            'do_execveat_common|do_execve|compat_do_execve' \
-            fs/exec.c || true
-
-          echo
-          echo "--- fs/open.c ---"
-          grep -nE \
-            'faccessat' \
-            fs/open.c || true
-
-          echo
-          echo "--- fs/read_write.c ---"
-          grep -nE \
-            'ksys_read|SYSCALL_DEFINE3\(read' \
-            fs/read_write.c || true
-
-          echo
-          echo "--- kernel/reboot.c ---"
-          grep -nE \
-            'SYSCALL_DEFINE4\(reboot' \
-            kernel/reboot.c || true
-
-          echo
-          echo "[PASS] Source-tree inspection completed"
 
       # ============================================================
       # Install ReSukiSU
@@ -212,10 +159,6 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "Cloning ReSukiSU"
-          echo "========================================"
-
           rm -rf KernelSU
 
           git clone \
@@ -224,29 +167,24 @@ jobs:
             https://github.com/ReSukiSU/ReSukiSU.git \
             KernelSU
 
-          test -d KernelSU
           test -d KernelSU/kernel
 
-          echo
-          echo "ReSukiSU commit:"
-          git -C KernelSU rev-parse HEAD
+          echo "========================================"
+          echo "ReSukiSU commit"
+          echo "========================================"
 
-          echo
-          echo "ReSukiSU repository:"
-          git -C KernelSU remote -v
+          git -C KernelSU rev-parse HEAD
 
           if [ -d drivers ]; then
             DRIVER_DIR="$PWD/drivers"
           elif [ -d common/drivers ]; then
             DRIVER_DIR="$PWD/common/drivers"
           else
-            echo "[FAIL] No kernel drivers directory found"
+            echo "[FAIL] No drivers directory"
             exit 1
           fi
 
-          echo
-          echo "Driver directory:"
-          echo "$DRIVER_DIR"
+          echo "Driver directory: $DRIVER_DIR"
 
           rm -f "$DRIVER_DIR/kernelsu"
 
@@ -255,10 +193,6 @@ jobs:
             "$DRIVER_DIR/kernelsu"
 
           test -L "$DRIVER_DIR/kernelsu"
-
-          echo
-          echo "KernelSU symlink:"
-          ls -l "$DRIVER_DIR/kernelsu"
 
           if ! grep -qF \
             'obj-$(CONFIG_KSU) += kernelsu/' \
@@ -277,61 +211,87 @@ jobs:
               "$DRIVER_DIR/Kconfig"
           fi
 
-          echo
-          echo "========================================"
-          echo "ReSukiSU integration verification"
-          echo "========================================"
-
-          grep -nF \
-            'obj-$(CONFIG_KSU) += kernelsu/' \
-            "$DRIVER_DIR/Makefile"
-
-          grep -nF \
-            'source "drivers/kernelsu/Kconfig"' \
-            "$DRIVER_DIR/Kconfig"
-
           test -f "$DRIVER_DIR/kernelsu/Makefile"
           test -f "$DRIVER_DIR/kernelsu/Kconfig"
 
-          echo
-          echo "[PASS] ReSukiSU kernel directory installed"
-          echo "[PASS] drivers/Makefile integrated"
-          echo "[PASS] drivers/Kconfig integrated"
+          echo "[PASS] ReSukiSU installed"
 
       # ============================================================
-      # Remove KSU settings from the device fragment
+      # Force manual-hook Kconfig choice
       #
-      # We do NOT modify the repository permanently.
-      # This prevents merge_config from reporting KSU_MANUAL_HOOK
-      # as being defined twice.
+      # ReSukiSU currently declares:
+      #
+      # choice
+      #     default KSU_TRACEPOINT_HOOK
+      #
+      # That default is unsuitable for this 4.19 non-GKI kernel.
+      #
+      # We modify only the CI checkout, not the repository.
       # ============================================================
 
-      - name: Inspect ReSukiSU Kconfig
+      - name: Configure ReSukiSU manual hook mode
         working-directory: kernel
         run: |
           set -e
 
-          echo "========================================"
-          echo "ReSukiSU Kconfig"
-          echo "========================================"
-
-          grep -n -A80 -B20 \
-            -E 'KSU_MANUAL_HOOK|KSU_TRACEPOINT_HOOK|choice' \
-            KernelSU/kernel/Kconfig || true
-
-      - name: Inspect ReSukiSU Kconfig
-        working-directory: kernel
-        run: |
-          set -e
+          KSU_KCONFIG="KernelSU/kernel/Kconfig"
 
           echo "========================================"
-          echo "ReSukiSU Kconfig"
+          echo "Original ReSukiSU hook choice"
           echo "========================================"
 
-          grep -n -A80 -B20 \
-            -E 'KSU_MANUAL_HOOK|KSU_TRACEPOINT_HOOK|choice' \
-            KernelSU/kernel/Kconfig || true
-            
+          grep -n -A20 \
+            'prompt "KernelSU Hooking Method"' \
+            "$KSU_KCONFIG"
+
+          echo
+          echo "Forcing manual hook as the default..."
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("KernelSU/kernel/Kconfig")
+          text = path.read_text()
+
+          old = """choice
+              prompt "KernelSU Hooking Method"
+              depends on KSU
+              default KSU_TRACEPOINT_HOOK"""
+
+          new = """choice
+              prompt "KernelSU Hooking Method"
+              depends on KSU
+              default KSU_MANUAL_HOOK"""
+
+          if old not in text:
+              raise SystemExit(
+                  "ERROR: Expected ReSukiSU Kconfig choice was not found"
+              )
+
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          echo
+          echo "========================================"
+          echo "Modified ReSukiSU hook choice"
+          echo "========================================"
+
+          grep -n -A20 \
+            'prompt "KernelSU Hooking Method"' \
+            "$KSU_KCONFIG"
+
+          grep -q \
+            'default KSU_MANUAL_HOOK' \
+            "$KSU_KCONFIG"
+
+          echo "[PASS] Manual hook is now the Kconfig default"
+
+      # ============================================================
+      # Prepare GTA4L configuration
+      # ============================================================
+
       - name: Prepare GTA4L configuration
         working-directory: kernel
         run: |
@@ -354,11 +314,14 @@ jobs:
             "$CONFIG"
 
           echo "========================================"
-          echo "GTA4L configuration"
+          echo "GTA4L Kconfig fragment"
           echo "========================================"
 
-          grep '^CONFIG_KSU' "$CONFIG" || \
+          if grep -q '^CONFIG_KSU' "$CONFIG"; then
+            grep '^CONFIG_KSU' "$CONFIG"
+          else
             echo "[PASS] No KSU options remain in GTA4L fragment"
+          fi
 
       # ============================================================
       # Manual hooks
@@ -384,12 +347,7 @@ jobs:
           def save(path, text):
               Path(path).write_text(text)
 
-          def insert_after_opening_brace(
-              text,
-              function_regex,
-              code,
-              name
-          ):
+          def insert_after_opening_brace(text, function_regex, code, name):
               match = re.search(
                   function_regex + r'\s*\{',
                   text,
@@ -424,6 +382,7 @@ jobs:
 
           declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
           extern int ksu_handle_stat(
               int *dfd,
               const char __user **filename_user,
@@ -433,9 +392,11 @@ jobs:
               unsigned int *fd,
               struct stat __user **statbuf_ptr);
 
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
           extern void ksu_handle_fstat64_ret(
               unsigned long *fd,
               struct stat64 __user **statbuf_ptr);
+          #endif
           #endif
           """
 
@@ -447,7 +408,7 @@ jobs:
               )
 
               if not anchor:
-                  die("stat: newfstatat syscall not found")
+                  die("stat: newfstatat not found")
 
               text = (
                   text[:anchor.start()]
@@ -455,8 +416,6 @@ jobs:
                   + "\n\n"
                   + text[anchor.start():]
               )
-
-              print("[OK] stat declarations inserted")
 
           newfstatat = (
               r'SYSCALL_DEFINE4\(newfstatat,\s*'
@@ -473,7 +432,7 @@ jobs:
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_stat(&dfd, &filename, &flag);
           #endif
-          """,
+              """,
               "stat/newfstatat"
           )
 
@@ -485,16 +444,23 @@ jobs:
               r'int,\s*flag\)'
           )
 
-          text = insert_after_opening_brace(
+          match = re.search(
+              fstatat64 + r'\s*\{',
               text,
-              fstatat64,
-              r"""
+              re.MULTILINE
+          )
+
+          if match:
+              text = insert_after_opening_brace(
+                  text,
+                  fstatat64,
+                  r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_stat(&dfd, &filename, &flag);
           #endif
-          """,
-              "stat/fstatat64"
-          )
+                  """,
+                  "stat/fstatat64"
+              )
 
           newfstat = (
               r'SYSCALL_DEFINE2\(newfstat,\s*'
@@ -509,7 +475,7 @@ jobs:
           )
 
           if not match:
-              die("stat: newfstat function not found")
+              die("stat: newfstat not found")
 
           body = match.group(0)
 
@@ -553,38 +519,36 @@ jobs:
               re.MULTILINE | re.DOTALL
           )
 
-          if not match:
-              die("stat: fstat64 function not found")
+          if match:
+              body = match.group(0)
 
-          body = match.group(0)
+              if "ksu_handle_fstat64_ret(&fd, &statbuf)" not in body:
+                  return_match = re.search(
+                      r'(\n\s*return\s+error;)',
+                      body
+                  )
 
-          if "ksu_handle_fstat64_ret(&fd, &statbuf)" not in body:
-              return_match = re.search(
-                  r'(\n\s*return\s+error;)',
-                  body
-              )
+                  if not return_match:
+                      die("stat: fstat64 return anchor not found")
 
-              if not return_match:
-                  die("stat: fstat64 return anchor not found")
-
-              hook = r"""
+                  hook = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
               ksu_handle_fstat64_ret(&fd, &statbuf);
           #endif
-              """
+                  """
 
-              body = (
-                  body[:return_match.start()]
-                  + "\n"
-                  + hook
-                  + body[return_match.start():]
-              )
+                  body = (
+                      body[:return_match.start()]
+                      + "\n"
+                      + hook
+                      + body[return_match.start():]
+                  )
 
-              text = (
-                  text[:match.start()]
-                  + body
-                  + text[match.end():]
-              )
+                  text = (
+                      text[:match.start()]
+                      + body
+                      + text[match.end():]
+                  )
 
           save(path, text)
 
@@ -597,18 +561,20 @@ jobs:
 
           exec_declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
           extern int ksu_handle_execveat(
               int *fd,
               struct filename **filename_ptr,
-              struct user_arg_ptr *argv,
-              struct user_arg_ptr *envp,
+              void *argv,
+              void *envp,
               int *flags);
 
+          __attribute__((hot))
           extern int ksu_handle_post_execveat(
               int *fd,
               struct filename **filename_ptr,
-              struct user_arg_ptr *argv,
-              struct user_arg_ptr *envp,
+              void *argv,
+              void *envp,
               int *flags,
               int *retval);
           #endif
@@ -702,11 +668,7 @@ jobs:
           #endif
               """
 
-              body = body.replace(
-                  old,
-                  new.strip(),
-                  1
-              )
+              body = body.replace(old, new.strip(), 1)
 
               text = (
                   text[:match.start()]
@@ -735,6 +697,7 @@ jobs:
 
               declarations = r"""
           #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
           extern int ksu_handle_faccessat(
               int *dfd,
               const char __user **filename_user,
@@ -768,64 +731,8 @@ jobs:
                   &mode,
                   NULL);
           #endif
-          """,
+              """,
               "open/faccessat"
-          )
-
-          save(path, text)
-
-          # ========================================================
-          # fs/read_write.c
-          # ========================================================
-
-          path = "fs/read_write.c"
-          text = load(path)
-
-          if "ksu_handle_sys_read(" not in text:
-              anchor = re.search(
-                  r'^SYSCALL_DEFINE3\(read,',
-                  text,
-                  re.MULTILINE
-              )
-
-              if not anchor:
-                  die("read: read syscall not found")
-
-              declarations = r"""
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-          extern bool ksu_init_rc_hook __read_mostly;
-
-          extern __attribute__((cold)) int ksu_handle_sys_read(
-              unsigned int fd,
-              char __user **buf_ptr,
-              size_t *count_ptr);
-          #endif
-              """
-
-              text = (
-                  text[:anchor.start()]
-                  + declarations.strip()
-                  + "\n\n"
-                  + text[anchor.start():]
-              )
-
-          read_function = (
-              r'SYSCALL_DEFINE3\(read,\s*'
-              r'unsigned int,\s*fd,\s*'
-              r'char __user \*,\s*buf,\s*'
-              r'size_t,\s*count\)'
-          )
-
-          text = insert_after_opening_brace(
-              text,
-              read_function,
-              r"""
-          #ifdef CONFIG_KSU_MANUAL_HOOK
-              if (unlikely(ksu_init_rc_hook))
-                  ksu_handle_sys_read(fd, &buf, &count);
-          #endif
-          """,
-              "read"
           )
 
           save(path, text)
@@ -883,7 +790,7 @@ jobs:
                   cmd,
                   &arg);
           #endif
-          """,
+              """,
               "reboot"
           )
 
@@ -902,7 +809,6 @@ jobs:
               "fs/stat.c": [
                   "ksu_handle_stat(&dfd, &filename, &flag)",
                   "ksu_handle_newfstat_ret(&fd, &statbuf)",
-                  "ksu_handle_fstat64_ret(&fd, &statbuf)",
               ],
               "fs/exec.c": [
                   "ksu_handle_execveat(",
@@ -910,10 +816,6 @@ jobs:
               ],
               "fs/open.c": [
                   "ksu_handle_faccessat(",
-              ],
-              "fs/read_write.c": [
-                  "ksu_init_rc_hook",
-                  "ksu_handle_sys_read(fd, &buf, &count)",
               ],
               "kernel/reboot.c": [
                   "ksu_handle_sys_reboot(",
@@ -932,31 +834,8 @@ jobs:
 
               print(f"[PASS] {filename}")
 
-          print()
-          print("[PASS] All required ReSukiSU hooks are present.")
+          print("[PASS] Required manual hooks are present.")
           PY
-
-      # ============================================================
-      # Show modifications
-      # ============================================================
-
-      - name: Show ReSukiSU modifications
-        working-directory: kernel
-        run: |
-          set -e
-
-          echo "========================================"
-          echo "ReSukiSU source modifications"
-          echo "========================================"
-
-          grep -R -n \
-            -E \
-            'ksu_handle_(stat|newfstat_ret|fstat64_ret|execveat|post_execveat|faccessat|sys_read|sys_reboot)' \
-            fs/stat.c \
-            fs/exec.c \
-            fs/open.c \
-            fs/read_write.c \
-            kernel/reboot.c
 
       # ============================================================
       # Configure kernel
@@ -977,19 +856,6 @@ jobs:
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
           echo "========================================"
-          echo "Toolchain"
-          echo "========================================"
-
-          command -v make
-          command -v clang
-          command -v ld.lld
-
-          make --version
-          clang --version
-          ld.lld --version
-
-          echo
-          echo "========================================"
           echo "Base defconfig"
           echo "========================================"
 
@@ -1000,7 +866,6 @@ jobs:
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
-          echo
           echo "========================================"
           echo "Merge GTA4L configuration"
           echo "========================================"
@@ -1010,9 +875,8 @@ jobs:
             "${OUT_DIR}/.config" \
             arch/arm64/configs/vendor/gta4l-common.config
 
-          echo
           echo "========================================"
-          echo "Select ReSukiSU manual hook"
+          echo "Create ReSukiSU configuration"
           echo "========================================"
 
           cat > "${OUT_DIR}/resukisu.config" <<'EOF'
@@ -1023,10 +887,16 @@ jobs:
 
           cat "${OUT_DIR}/resukisu.config"
 
-          echo
           echo "========================================"
           echo "Apply ReSukiSU Kconfig"
           echo "========================================"
+
+          # IMPORTANT:
+          # Do NOT use -m here.
+          #
+          # We deliberately changed the ReSukiSU choice default to
+          # KSU_MANUAL_HOOK above. merge_config.sh therefore runs
+          # Kconfig and resolves the choice correctly.
 
           scripts/kconfig/merge_config.sh \
             "${OUT_DIR}/.config" \
@@ -1037,40 +907,6 @@ jobs:
           echo "Final KSU configuration"
           echo "========================================"
 
-          grep '^CONFIG_KSU=' \
-            "${OUT_DIR}/.config"
-
-          grep '^CONFIG_KSU_MANUAL_HOOK=' \
-            "${OUT_DIR}/.config"
-
-          grep '^CONFIG_KSU_TRACEPOINT_HOOK=' \
-            "${OUT_DIR}/.config" || true
-
-          test "$(sed -n 's/^CONFIG_KSU=//p' "${OUT_DIR}/.config")" = "y"
-
-          test "$(sed -n 's/^CONFIG_KSU_MANUAL_HOOK=//p' "${OUT_DIR}/.config")" = "y"
-
-          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y' "${OUT_DIR}/.config"; then
-              echo "ERROR: ReSukiSU tracepoint hook is enabled!"
-              exit 1
-          fi
-
-          echo
-          echo "========================================"
-          echo "Final KSU configuration"
-          echo "========================================"
-
-          grep '^CONFIG_KSU=' \
-            "${OUT_DIR}/.config"
-
-          grep '^CONFIG_KSU_MANUAL_HOOK=' \
-            "${OUT_DIR}/.config"
-
-          grep '^CONFIG_KSU_TRACEPOINT_HOOK=' \
-            "${OUT_DIR}/.config" || true
-
-          echo
-          echo "All KSU options:"
           grep '^CONFIG_KSU' \
             "${OUT_DIR}/.config" || true
 
@@ -1092,7 +928,7 @@ jobs:
 
           echo "[PASS] CONFIG_KSU=y"
           echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
-          echo "[PASS] Tracepoint hook is disabled"
+          echo "[PASS] Tracepoint hook disabled"
 
       # ============================================================
       # Build
@@ -1113,15 +949,8 @@ jobs:
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
           echo "========================================"
-          echo "Final build toolchain"
+          echo "Build"
           echo "========================================"
-
-          command -v make
-          command -v clang
-          command -v ld.lld
-
-          echo
-          echo "Starting kernel build..."
 
           make \
             O="${OUT_DIR}" \
@@ -1149,7 +978,6 @@ jobs:
           test -f "${OUT_DIR}/System.map"
           test -f "${OUT_DIR}/.config"
 
-          echo
           echo "========================================"
           echo "Kernel build successful"
           echo "========================================"
@@ -1160,12 +988,7 @@ jobs:
             "${OUT_DIR}/vmlinux" \
             "${OUT_DIR}/System.map"
 
-          echo
-          echo "Image:"
           file "$IMAGE"
-
-          echo
-          echo "Image.gz:"
           file "$IMAGE_GZ"
 
       # ============================================================
@@ -1203,8 +1026,8 @@ jobs:
             kernel-artifact/
 
           cp \
-            "${KERNEL_DIR}/arch/arm64/configs/vendor/gta4l-common.config" \
-            kernel-artifact/
+            "${KERNEL_DIR}/arch/arm64/configs/vendor/gta4l-common.config.original" \
+            kernel-artifact/gta4l-common.config
 
           cat > kernel-artifact/BUILD_INFO.txt <<EOF
           Device: Samsung Galaxy Tab A7 SM-T505
@@ -1223,11 +1046,6 @@ jobs:
           tar -czf \
             resukisu-sm6115-kernel.tar.gz \
             -C kernel-artifact .
-
-          echo
-          echo "========================================"
-          echo "Artifact"
-          echo "========================================"
 
           ls -lh resukisu-sm6115-kernel.tar.gz
 
