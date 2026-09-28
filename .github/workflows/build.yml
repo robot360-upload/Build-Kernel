@@ -1,0 +1,574 @@
+name: Build ReSukiSU - Galaxy Tab A7 SM-T505
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      KERNEL_REPO: LineageOS/android_kernel_samsung_sm6115
+      KERNEL_BRANCH: lineage-23.2
+
+      CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b
+      CLANG_BRANCH: lineage-20.0
+
+      KERNEL_DIR: ${{ github.workspace }}/kernel
+      CLANG_DIR: ${{ github.workspace }}/clang-r416183b
+      OUT_DIR: ${{ github.workspace }}/out
+
+    steps:
+
+      # ============================================================
+      # Dependencies
+      # ============================================================
+
+      - name: Install build dependencies
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git \
+            make \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            clang \
+            lld \
+            llvm \
+            libssl-dev \
+            libelf-dev \
+            libdw-dev \
+            cpio \
+            rsync \
+            python3 \
+            unzip \
+            zip \
+            curl \
+            wget \
+            ca-certificates \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
+
+      # ============================================================
+      # Kernel source
+      # ============================================================
+
+      - name: Clone LineageOS SM6115 kernel
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${KERNEL_BRANCH}" \
+            "https://github.com/${KERNEL_REPO}.git" \
+            "${KERNEL_DIR}"
+
+          cd "${KERNEL_DIR}"
+
+          echo "========================================"
+          echo "Kernel repository"
+          echo "========================================"
+
+          git remote -v
+          echo "Branch: $(git branch --show-current)"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Kernel version:"
+          make kernelversion
+
+      # ============================================================
+      # LineageOS clang-r416183b
+      # ============================================================
+
+      - name: Clone clang-r416183b
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${CLANG_BRANCH}" \
+            "https://github.com/${CLANG_REPO}.git" \
+            "${CLANG_DIR}"
+
+          echo "========================================"
+          echo "Clang"
+          echo "========================================"
+
+          "${CLANG_DIR}/bin/clang" --version
+
+          test -x "${CLANG_DIR}/bin/clang"
+          test -x "${CLANG_DIR}/bin/ld.lld"
+
+      # ============================================================
+      # Verify kernel tree
+      # ============================================================
+
+      - name: Verify kernel tree
+        working-directory: kernel
+        run: |
+          set -e
+
+          for file in \
+            fs/stat.c \
+            fs/exec.c \
+            fs/open.c \
+            fs/read_write.c \
+            kernel/reboot.c \
+            arch/arm64/configs/vendor/bengal-perf_defconfig \
+            arch/arm64/configs/vendor/gta4l-common.config
+          do
+            test -f "$file"
+          done
+
+          echo "[PASS] Kernel tree verified"
+
+      # ============================================================
+      # Install ReSukiSU
+      # ============================================================
+
+      - name: Install ReSukiSU
+        working-directory: kernel
+        run: |
+          set -euxo pipefail
+
+          rm -rf KernelSU
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            https://github.com/ReSukiSU/ReSukiSU.git \
+            KernelSU
+
+          test -d KernelSU/kernel
+
+          echo "========================================"
+          echo "ReSukiSU commit"
+          echo "========================================"
+
+          git -C KernelSU rev-parse HEAD
+
+          DRIVER_DIR="$PWD/drivers"
+
+          test -d "$DRIVER_DIR"
+
+          rm -f "$DRIVER_DIR/kernelsu"
+
+          ln -s \
+            "$(realpath --relative-to="$DRIVER_DIR" "$PWD/KernelSU/kernel")" \
+            "$DRIVER_DIR/kernelsu"
+
+          if ! grep -qF \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            "$DRIVER_DIR/Makefile"; then
+
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
+              >> "$DRIVER_DIR/Makefile"
+          fi
+
+          if ! grep -qF \
+            'source "drivers/kernelsu/Kconfig"' \
+            "$DRIVER_DIR/Kconfig"; then
+
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' \
+              >> "$DRIVER_DIR/Kconfig"
+          fi
+
+          test -L "$DRIVER_DIR/kernelsu"
+
+          echo "[PASS] ReSukiSU installed"
+
+      # ============================================================
+      # Force ReSukiSU manual hooks
+      #
+      # SM-T505 = 4.19 non-GKI
+      #
+      # ReSukiSU's default choice is:
+      #
+      #   default KSU_TRACEPOINT_HOOK
+      #
+      # Tracepoint hook requires 5.10+ GKI.
+      #
+      # Change only the CI checkout to:
+      #
+      #   default KSU_MANUAL_HOOK
+      # ============================================================
+
+      - name: Configure ReSukiSU manual hook mode
+        working-directory: kernel
+        run: |
+          set -e
+
+          KSU_KCONFIG="KernelSU/kernel/Kconfig"
+
+          test -f "$KSU_KCONFIG"
+
+          echo "========================================"
+          echo "Original ReSukiSU hook choice"
+          echo "========================================"
+
+          grep -n -A20 \
+            'prompt "KernelSU Hooking Method"' \
+            "$KSU_KCONFIG"
+
+          echo
+          echo "Forcing manual hook as the default..."
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("KernelSU/kernel/Kconfig")
+          text = path.read_text()
+
+          marker = 'prompt "KernelSU Hooking Method"'
+
+          start = text.find(marker)
+
+          if start == -1:
+              raise SystemExit(
+                  "ERROR: KernelSU Hooking Method choice not found"
+              )
+
+          end = text.find(
+              'config KSU_TRACEPOINT_HOOK',
+              start
+          )
+
+          if end == -1:
+              raise SystemExit(
+                  "ERROR: KSU_TRACEPOINT_HOOK config not found"
+              )
+
+          block = text[start:end]
+
+          old = "default KSU_TRACEPOINT_HOOK"
+          new = "default KSU_MANUAL_HOOK"
+
+          if old in block:
+              block = block.replace(old, new, 1)
+
+              text = (
+                  text[:start]
+                  + block
+                  + text[end:]
+              )
+
+              path.write_text(text)
+
+              print(
+                  "[PASS] Changed "
+                  "KSU_TRACEPOINT_HOOK -> KSU_MANUAL_HOOK"
+              )
+
+          elif new in block:
+              print(
+                  "[OK] Manual hook is already "
+                  "the default"
+              )
+
+          else:
+              print(block)
+              raise SystemExit(
+                  "ERROR: Neither expected Kconfig "
+                  "default was found"
+              )
+          PY
+
+          echo
+          echo "========================================"
+          echo "Modified ReSukiSU hook choice"
+          echo "========================================"
+
+          grep -n -A20 \
+            'prompt "KernelSU Hooking Method"' \
+            "$KSU_KCONFIG"
+
+          grep -A5 \
+            'prompt "KernelSU Hooking Method"' \
+            "$KSU_KCONFIG" \
+            | grep -q \
+            'default KSU_MANUAL_HOOK'
+
+          echo "[PASS] Manual hook is Kconfig default"
+
+      # ============================================================
+      # Prepare GTA4L config
+      # ============================================================
+
+      - name: Prepare GTA4L configuration
+        working-directory: kernel
+        run: |
+          set -e
+
+          CONFIG="arch/arm64/configs/vendor/gta4l-common.config"
+
+          cp "$CONFIG" "${CONFIG}.original"
+
+          sed -i \
+            '/^[[:space:]]*CONFIG_KSU=y[[:space:]]*$/d' \
+            "$CONFIG"
+
+          sed -i \
+            '/^[[:space:]]*CONFIG_KSU_MANUAL_HOOK=y[[:space:]]*$/d' \
+            "$CONFIG"
+
+          sed -i \
+            '/^[[:space:]]*CONFIG_KSU_TRACEPOINT_HOOK=y[[:space:]]*$/d' \
+            "$CONFIG"
+
+          echo "========================================"
+          echo "GTA4L KSU configuration"
+          echo "========================================"
+
+          grep '^CONFIG_KSU' "$CONFIG" || \
+            echo "[PASS] No old KSU settings"
+
+      # ============================================================
+      # Configure kernel
+      # ============================================================
+
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          set -e
+
+          export PATH="${CLANG_DIR}/bin:${PATH}"
+
+          echo "========================================"
+          echo "Base defconfig"
+          echo "========================================"
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          echo "========================================"
+          echo "Merge GTA4L configuration"
+          echo "========================================"
+
+          scripts/kconfig/merge_config.sh \
+            -m \
+            "${OUT_DIR}/.config" \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          echo "========================================"
+          echo "Create ReSukiSU configuration"
+          echo "========================================"
+
+          cat > "${OUT_DIR}/resukisu.config" <<'EOF'
+          CONFIG_KSU=y
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_MANUAL_HOOK=y
+          EOF
+
+          cat "${OUT_DIR}/resukisu.config"
+
+          echo
+          echo "========================================"
+          echo "Apply ReSukiSU Kconfig"
+          echo "========================================"
+
+          # IMPORTANT:
+          #
+          # No -m here.
+          #
+          # merge_config.sh must run Kconfig so that
+          # the manual-hook choice is actually resolved.
+
+          scripts/kconfig/merge_config.sh \
+            "${OUT_DIR}/.config" \
+            "${OUT_DIR}/resukisu.config"
+
+          echo
+          echo "========================================"
+          echo "Final KSU configuration"
+          echo "========================================"
+
+          grep '^CONFIG_KSU' \
+            "${OUT_DIR}/.config" || true
+
+          echo
+          echo "========================================"
+          echo "Validate KSU configuration"
+          echo "========================================"
+
+          KSU="$(sed -n \
+            's/^CONFIG_KSU=//p' \
+            "${OUT_DIR}/.config")"
+
+          MANUAL="$(sed -n \
+            's/^CONFIG_KSU_MANUAL_HOOK=//p' \
+            "${OUT_DIR}/.config")"
+
+          if [ "$KSU" != "y" ]; then
+            echo "[FAIL] CONFIG_KSU is not y"
+            exit 1
+          fi
+
+          if [ "$MANUAL" != "y" ]; then
+            echo "[FAIL] CONFIG_KSU_MANUAL_HOOK is not y"
+            exit 1
+          fi
+
+          if grep -q \
+            '^CONFIG_KSU_TRACEPOINT_HOOK=y' \
+            "${OUT_DIR}/.config"; then
+
+            echo "[FAIL] Tracepoint hook is enabled"
+            exit 1
+          fi
+
+          echo "[PASS] CONFIG_KSU=y"
+          echo "[PASS] CONFIG_KSU_MANUAL_HOOK=y"
+          echo "[PASS] CONFIG_KSU_TRACEPOINT_HOOK disabled"
+
+      # ============================================================
+      # Build
+      # ============================================================
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          set -e
+
+          export PATH="${CLANG_DIR}/bin:${PATH}"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+          echo "========================================"
+          echo "Building SM6115 kernel"
+          echo "========================================"
+
+          make \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc)" \
+            Image \
+            Image.gz
+
+      # ============================================================
+      # Verify
+      # ============================================================
+
+      - name: Verify kernel
+        run: |
+          set -e
+
+          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          test -f "${OUT_DIR}/arch/arm64/boot/Image.gz"
+          test -f "${OUT_DIR}/vmlinux"
+          test -f "${OUT_DIR}/System.map"
+          test -f "${OUT_DIR}/.config"
+
+          echo "========================================"
+          echo "Kernel build successful"
+          echo "========================================"
+
+          ls -lh \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            "${OUT_DIR}/vmlinux" \
+            "${OUT_DIR}/System.map"
+
+          file \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz"
+
+      # ============================================================
+      # Package
+      # ============================================================
+
+      - name: Package kernel
+        run: |
+          set -e
+
+          mkdir -p kernel-artifact
+
+          cp \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/arch/arm64/boot/Image.gz" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/vmlinux" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/System.map" \
+            kernel-artifact/
+
+          cp \
+            "${OUT_DIR}/.config" \
+            kernel-artifact/kernel.config
+
+          cp \
+            "${KERNEL_DIR}/arch/arm64/configs/vendor/bengal-perf_defconfig" \
+            kernel-artifact/
+
+          cp \
+            "${KERNEL_DIR}/arch/arm64/configs/vendor/gta4l-common.config.original" \
+            kernel-artifact/gta4l-common.config
+
+          cat > kernel-artifact/BUILD_INFO.txt <<EOF
+          Device: Samsung Galaxy Tab A7 SM-T505
+          Codename: gta4l
+          Kernel: 4.19.325
+
+          Kernel repository:
+          ${KERNEL_REPO}
+
+          Kernel branch:
+          ${KERNEL_BRANCH}
+
+          Kernel commit:
+          $(cd "${KERNEL_DIR}" && git rev-parse HEAD)
+
+          ReSukiSU: enabled
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KSU_TRACEPOINT_HOOK=n
+
+          Compiler:
+          clang-r416183b
+          EOF
+
+          tar -czf \
+            resukisu-sm6115-kernel.tar.gz \
+            -C kernel-artifact .
+
+          ls -lh resukisu-sm6115-kernel.tar.gz
+
+      # ============================================================
+      # Upload artifact
+      # ============================================================
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resukisu-sm6115-sm-t505
+          path: resukisu-sm6115-kernel.tar.gz
+          if-no-files-found: error
+          retention-days: 14
