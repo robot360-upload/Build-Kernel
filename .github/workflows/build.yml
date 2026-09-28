@@ -478,45 +478,28 @@ jobs:
           echo "=== Source-tree config/build artifacts ==="
           ls -la .config Module.symvers modules.order 2>/dev/null || true
 
-      - name: Verify source tree is clean
+      - name: Verify source tree
         working-directory: kernel
         run: |
           set -e
 
-          echo "===== Git status ====="
-          git status --short
+          echo "===== Source tree artifacts ====="
 
-          echo
-          echo "===== Source-tree generated artifacts ====="
-
-          for f in \
-            .config \
-            Module.symvers \
-            System.map \
-            modules.order \
-            include/config/kernel.release
-          do
+          for f in .config Module.symvers System.map modules.order; do
             if [ -e "$f" ]; then
-              echo "FOUND: $f"
+              echo "ERROR: $f exists in kernel source tree"
+              exit 1
             fi
           done
 
-          echo
-          echo "===== Generated directories ====="
-
-          for d in \
-            include/config \
-            include/generated \
-            arch/arm64/include/generated
-          do
+          for d in include/config include/generated arch/arm64/include/generated; do
             if [ -e "$d" ]; then
-              echo "FOUND: $d"
+              echo "ERROR: $d exists in kernel source tree"
+              exit 1
             fi
           done
 
-          echo
-          echo "===== Git status after configuration ====="
-          git status --short
+          echo "Source tree is clean of build artifacts."
 
       - name: Build kernel
         working-directory: kernel
