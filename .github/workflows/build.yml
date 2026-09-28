@@ -1023,22 +1023,37 @@ jobs:
 
           cat "${OUT_DIR}/resukisu.config"
 
+          echo
+          echo "========================================"
+          echo "Apply ReSukiSU Kconfig"
+          echo "========================================"
+
           scripts/kconfig/merge_config.sh \
-            -m \
             "${OUT_DIR}/.config" \
             "${OUT_DIR}/resukisu.config"
 
           echo
           echo "========================================"
-          echo "Resolve final configuration"
+          echo "Final KSU configuration"
           echo "========================================"
 
-          make \
-            O="${OUT_DIR}" \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            olddefconfig
+          grep '^CONFIG_KSU=' \
+            "${OUT_DIR}/.config"
+
+          grep '^CONFIG_KSU_MANUAL_HOOK=' \
+            "${OUT_DIR}/.config"
+
+          grep '^CONFIG_KSU_TRACEPOINT_HOOK=' \
+            "${OUT_DIR}/.config" || true
+
+          test "$(sed -n 's/^CONFIG_KSU=//p' "${OUT_DIR}/.config")" = "y"
+
+          test "$(sed -n 's/^CONFIG_KSU_MANUAL_HOOK=//p' "${OUT_DIR}/.config")" = "y"
+
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y' "${OUT_DIR}/.config"; then
+              echo "ERROR: ReSukiSU tracepoint hook is enabled!"
+              exit 1
+          fi
 
           echo
           echo "========================================"
