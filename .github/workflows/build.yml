@@ -437,6 +437,29 @@ jobs:
       # ============================================================
       # Build
       # ============================================================
+      - name: Diagnose dirty kernel source tree
+        working-directory: kernel
+        run: |
+          echo "=== Git status ==="
+          git status --short
+
+          echo
+          echo "=== Untracked files ==="
+          git ls-files --others --exclude-standard
+
+          echo
+          echo "=== Generated files in source tree ==="
+          find . -maxdepth 3 \
+            \( -name "*.o" -o \
+               -name "*.cmd" -o \
+               -name "*.ko" -o \
+               -name "Module.symvers" -o \
+               -name "modules.order" \) \
+            -print | head -100
+
+          echo
+          echo "=== Source-tree config/build artifacts ==="
+          ls -la .config Module.symvers modules.order 2>/dev/null || true
 
       - name: Build kernel
         working-directory: kernel
