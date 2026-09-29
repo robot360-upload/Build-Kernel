@@ -20,6 +20,7 @@ jobs:
             flex \
             git \
             libelf-dev \
+            lld \
             python3 \
             rsync \
             xz-utils \
