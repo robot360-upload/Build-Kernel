@@ -1,0 +1,915 @@
+name: Build ReSukiSU + NoMount SM6115 Kernel - GTA4L
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            git \
+            libelf-dev \
+            lld \
+            python3 \
+            rsync \
+            xz-utils \
+            zstd
+
+      - name: Checkout kernel source
+        run: |
+          set -euo pipefail
+
+          git clone --depth=1 \
+            --branch lineage-23.2 \
+            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            kernel
+
+      - name: Checkout LineageOS clang
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          mkdir -p prebuilts-master/clang/host/linux-x86
+
+          git clone --depth=1 \
+            --branch lineage-20.0 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            prebuilts-master/clang/host/linux-x86/clang-r416183b
+
+      - name: Install ReSukiSU
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          git clone --depth=1 \
+            https://github.com/ReSukiSU/ReSukiSU.git \
+            KernelSU
+
+          rm -rf drivers/kernelsu
+          ln -s ../KernelSU/kernel drivers/kernelsu
+
+      - name: Install NoMount
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          git clone --depth=1 \
+            --branch v2.0.0 \
+            https://github.com/maxsteeel/nomount.git \
+            NoMount
+
+          rm -rf fs/nomount
+          ln -s ../NoMount/kernel/src fs/nomount
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          makefile = Path("fs/Makefile")
+          text = makefile.read_text()
+
+          entry = "obj-$(CONFIG_NOMOUNT) += nomount/"
+
+          if entry not in text:
+              text += f"\n{entry}\n"
+              makefile.write_text(text)
+
+          kconfig = Path("fs/Kconfig")
+          text = kconfig.read_text()
+
+          entry = 'source "fs/nomount/Kconfig"'
+
+          if entry not in text:
+              text += f'\n{entry}\n'
+              kconfig.write_text(text)
+          PY
+
+          git diff --check
+
+      - name: Register ReSukiSU in kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          makefile = Path("drivers/Makefile")
+          text = makefile.read_text()
+
+          if "obj-$(CONFIG_KSU) += kernelsu/" not in text:
+              text += "\nobj-$(CONFIG_KSU) += kernelsu/\n"
+              makefile.write_text(text)
+
+          kconfig = Path("drivers/Kconfig")
+          text = kconfig.read_text()
+
+          entry = 'source "drivers/kernelsu/Kconfig"'
+
+          if entry not in text:
+              text += f'\n{entry}\n'
+              kconfig.write_text(text)
+          PY
+
+      - name: Force ReSukiSU manual hook mode
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("KernelSU/kernel/Kconfig")
+          text = path.read_text()
+
+          old = "default KSU_TRACEPOINT_HOOK"
+          new = "default KSU_MANUAL_HOOK"
+
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Apply ReSukiSU manual hooks
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          ROOT = Path(".")
+
+          def read(path):
+              return path.read_text()
+
+          def write(path, text):
+              path.write_text(text)
+
+          def find_matching_brace(text, open_brace):
+              depth = 0
+              i = open_brace
+              state = "normal"
+
+              while i < len(text):
+                  c = text[i]
+
+                  if state == "normal":
+                      if c == '"':
+                          state = "string"
+                      elif c == "'":
+                          state = "char"
+                      elif c == "/" and i + 1 < len(text):
+                          if text[i + 1] == "/":
+                              state = "line_comment"
+                              i += 1
+                          elif text[i + 1] == "*":
+                              state = "block_comment"
+                              i += 1
+                      elif c == "{":
+                          depth += 1
+                      elif c == "}":
+                          depth -= 1
+                          if depth == 0:
+                              return i
+
+                  elif state == "string":
+                      if c == "\\":
+                          i += 1
+                      elif c == '"':
+                          state = "normal"
+
+                  elif state == "char":
+                      if c == "\\":
+                          i += 1
+                      elif c == "'":
+                          state = "normal"
+
+                  elif state == "line_comment":
+                      if c == "\n":
+                          state = "normal"
+
+                  elif state == "block_comment":
+                      if c == "*" and i + 1 < len(text) and text[i + 1] == "/":
+                          state = "normal"
+                          i += 1
+
+                  i += 1
+
+              raise RuntimeError("Unmatched opening brace")
+
+          def find_definition(text, pattern):
+              match = re.search(
+                  pattern,
+                  text,
+                  re.MULTILINE | re.DOTALL
+              )
+
+              if not match:
+                  raise RuntimeError(
+                      f"Could not find function definition:\n{pattern}"
+                  )
+
+              open_brace = match.end() - 1
+
+              if text[open_brace] != "{":
+                  raise RuntimeError(
+                      "Regex did not end at opening brace"
+                  )
+
+              close_brace = find_matching_brace(
+                  text,
+                  open_brace
+              )
+
+              return match.start(), open_brace, close_brace
+
+          # ------------------------------------------------------------
+          # fs/exec.c
+          # ------------------------------------------------------------
+
+          path = ROOT / "fs/exec.c"
+          text = read(path)
+
+          exec_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_execveat(
+              int *fd,
+              struct filename **filename_ptr,
+              void *argv,
+              void *envp,
+              int *flags
+          );
+
+          __attribute__((hot))
+          extern int ksu_handle_post_execveat(
+              int *fd,
+              struct filename **filename_ptr,
+              void *argv,
+              void *envp,
+              int *flags,
+              int *retval
+          );
+          #endif
+
+          '''
+
+          if "ksu_handle_execveat" not in text:
+              marker = "static int do_execveat_common"
+              pos = text.index(marker)
+              text = text[:pos] + exec_decl + text[pos:]
+
+          pattern = (
+              r"static\s+int\s+do_execveat_common\s*"
+              r"\(\s*"
+              r"int\s+fd\s*,\s*"
+              r"struct\s+filename\s*\*filename\s*,\s*"
+              r"struct\s+user_arg_ptr\s+argv\s*,\s*"
+              r"struct\s+user_arg_ptr\s+envp\s*,\s*"
+              r"int\s+flags\s*"
+              r"\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          old = "return __do_execve_file(fd, filename, argv, envp, flags, NULL);"
+
+          new = r'''
+          	#ifdef CONFIG_KSU_MANUAL_HOOK
+          	int retval;
+
+          	ksu_handle_execveat(
+          		&fd,
+          		&filename,
+          		&argv,
+          		&envp,
+          		&flags
+          	);
+
+          	retval = __do_execve_file(
+          		fd,
+          		filename,
+          		argv,
+          		envp,
+          		flags,
+          		NULL
+          	);
+
+          	ksu_handle_post_execveat(
+          		&fd,
+          		&filename,
+          		&argv,
+          		&envp,
+          		&flags,
+          		&retval
+          	);
+
+          	return retval;
+          	#else
+          	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+          	#endif
+          '''
+
+          if old not in body:
+              raise RuntimeError(
+                  "Could not find __do_execve_file() return "
+                  "inside do_execveat_common()"
+              )
+
+          body = body.replace(old, new.strip("\n"), 1)
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          write(path, text)
+
+          # ------------------------------------------------------------
+          # fs/stat.c
+          # ------------------------------------------------------------
+
+          path = ROOT / "fs/stat.c"
+          text = read(path)
+
+          stat_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_stat(
+              int *dfd,
+              const char __user **filename_user,
+              int *flags
+          );
+
+          extern void ksu_handle_newfstat_ret(
+              unsigned int *fd,
+              struct stat __user **statbuf_ptr
+          );
+
+          #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+          extern void ksu_handle_fstat64_ret(
+              unsigned long *fd,
+              struct stat64 __user **statbuf_ptr
+          );
+          #endif
+          #endif
+
+          '''
+
+          if "ksu_handle_stat" not in text:
+              marker = "SYSCALL_DEFINE4(newfstatat"
+              pos = text.index(marker)
+              text = text[:pos] + stat_decl + text[pos:]
+
+          pattern = (
+              r"SYSCALL_DEFINE4\s*\(\s*newfstatat\s*,"
+              r".*?\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          hook = (
+              "\n"
+              "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+              "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+              "\t#endif\n"
+          )
+
+          target = "\n\terror = vfs_fstatat"
+
+          if "ksu_handle_stat(&dfd, &filename, &flag);" not in body:
+              pos = body.find(target)
+
+              if pos == -1:
+                  raise RuntimeError(
+                      "Could not find vfs_fstatat() in newfstatat()"
+                  )
+
+              body = body[:pos] + hook + body[pos:]
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          # newfstat
+          pattern = (
+              r"SYSCALL_DEFINE2\s*\(\s*newfstat\s*,"
+              r".*?\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          hook = (
+              "\n"
+              "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+              "\tksu_handle_newfstat_ret(&fd, &statbuf);\n"
+              "\t#endif\n"
+          )
+
+          target = "\n\treturn error;"
+
+          if "ksu_handle_newfstat_ret(&fd, &statbuf);" not in body:
+              pos = body.rfind(target)
+
+              if pos == -1:
+                  raise RuntimeError(
+                      "Could not find return error in newfstat()"
+                  )
+
+              body = body[:pos] + hook + body[pos:]
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          # fstat64
+          pattern = (
+              r"SYSCALL_DEFINE2\s*\(\s*fstat64\s*,"
+              r".*?\)\s*\{"
+          )
+
+          if re.search(pattern, text, re.MULTILINE | re.DOTALL):
+              _, open_brace, close_brace = find_definition(
+                  text,
+                  pattern
+              )
+
+              body = text[open_brace + 1:close_brace]
+
+              hook = (
+                  "\n"
+                  "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "\tksu_handle_fstat64_ret(&fd, &statbuf);\n"
+                  "\t#endif\n"
+              )
+
+              target = "\n\treturn error;"
+
+              if "ksu_handle_fstat64_ret(&fd, &statbuf);" not in body:
+                  pos = body.rfind(target)
+
+                  if pos == -1:
+                      raise RuntimeError(
+                          "Could not find return error in fstat64()"
+                      )
+
+                  body = body[:pos] + hook + body[pos:]
+
+              text = (
+                  text[:open_brace + 1]
+                  + body
+                  + text[close_brace:]
+              )
+
+          # fstatat64
+          pattern = (
+              r"SYSCALL_DEFINE4\s*\(\s*fstatat64\s*,"
+              r".*?\)\s*\{"
+          )
+
+          if re.search(pattern, text, re.MULTILINE | re.DOTALL):
+              _, open_brace, close_brace = find_definition(
+                  text,
+                  pattern
+              )
+
+              body = text[open_brace + 1:close_brace]
+
+              hook = (
+                  "\n"
+                  "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                  "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+                  "\t#endif\n"
+              )
+
+              target = "\n\terror = vfs_fstatat"
+
+              if "ksu_handle_stat(&dfd, &filename, &flag);" not in body:
+                  pos = body.find(target)
+
+                  if pos == -1:
+                      raise RuntimeError(
+                          "Could not find vfs_fstatat() in fstatat64()"
+                      )
+
+                  body = body[:pos] + hook + body[pos:]
+
+              text = (
+                  text[:open_brace + 1]
+                  + body
+                  + text[close_brace:]
+              )
+
+          write(path, text)
+
+          # ------------------------------------------------------------
+          # fs/open.c
+          # ------------------------------------------------------------
+
+          path = ROOT / "fs/open.c"
+          text = read(path)
+
+          faccess_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(
+              int *dfd,
+              const char __user **filename_user,
+              int *mode,
+              int *flags
+          );
+          #endif
+
+          '''
+
+          if "ksu_handle_faccessat" not in text:
+              marker = "SYSCALL_DEFINE3(faccessat"
+              pos = text.index(marker)
+              text = text[:pos] + faccess_decl + text[pos:]
+
+          pattern = (
+              r"SYSCALL_DEFINE3\s*\(\s*faccessat\s*,"
+              r".*?\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          hook = (
+              "\n"
+              "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+              "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+              "\t#endif\n"
+          )
+
+          if "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);" not in body:
+              body = hook + body
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          write(path, text)
+
+          # ------------------------------------------------------------
+          # kernel/reboot.c
+          # ------------------------------------------------------------
+
+          path = ROOT / "kernel/reboot.c"
+          text = read(path)
+
+          reboot_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern int ksu_handle_sys_reboot(
+              int magic1,
+              int magic2,
+              unsigned int cmd,
+              void __user **arg
+          );
+          #endif
+
+          '''
+
+          if "ksu_handle_sys_reboot" not in text:
+              marker = "SYSCALL_DEFINE4(reboot"
+              pos = text.index(marker)
+              text = text[:pos] + reboot_decl + text[pos:]
+
+          pattern = (
+              r"SYSCALL_DEFINE4\s*\(\s*reboot\s*,"
+              r".*?\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          hook = (
+              "\n"
+              "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+              "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+              "\t#endif\n"
+          )
+
+          target = "\n\tint ret = 0;"
+
+          if "ksu_handle_sys_reboot(" not in body:
+              pos = body.find(target)
+
+              if pos == -1:
+                  raise RuntimeError(
+                      "Could not find 'int ret = 0;' in reboot()"
+                  )
+
+              pos += len(target)
+              body = body[:pos] + hook + body[pos:]
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          write(path, text)
+
+          # ------------------------------------------------------------
+          # fs/read_write.c
+          # ------------------------------------------------------------
+
+          path = ROOT / "fs/read_write.c"
+          text = read(path)
+
+          read_decl = r'''
+          #ifdef CONFIG_KSU_MANUAL_HOOK
+          extern bool ksu_init_rc_hook __read_mostly;
+
+          extern __attribute__((cold))
+          int ksu_handle_sys_read(
+              unsigned int fd,
+              char __user **buf_ptr,
+              size_t *count_ptr
+          );
+          #endif
+
+          '''
+
+          if "ksu_handle_sys_read" not in text:
+              marker = "SYSCALL_DEFINE3(read"
+              pos = text.index(marker)
+              text = text[:pos] + read_decl + text[pos:]
+
+          pattern = (
+              r"SYSCALL_DEFINE3\s*\(\s*read\s*,"
+              r".*?\)\s*\{"
+          )
+
+          _, open_brace, close_brace = find_definition(
+              text,
+              pattern
+          )
+
+          body = text[open_brace + 1:close_brace]
+
+          hook = (
+              "\n"
+              "\t#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+              "\tif (unlikely(ksu_init_rc_hook))\n"
+              "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+              "\t#endif\n"
+          )
+
+          target = "\n\treturn ksys_read(fd, buf, count);"
+
+          if "ksu_handle_sys_read(fd, &buf, &count);" not in body:
+              pos = body.find(target)
+
+              if pos == -1:
+                  raise RuntimeError(
+                      "Could not find ksys_read() in read()"
+                  )
+
+              body = body[:pos] + hook + body[pos:]
+
+          text = (
+              text[:open_brace + 1]
+              + body
+              + text[close_brace:]
+          )
+
+          write(path, text)
+
+          # ------------------------------------------------------------
+          # Hook validation
+          # ------------------------------------------------------------
+
+          required = [
+              "ksu_handle_execveat",
+              "ksu_handle_post_execveat",
+              "ksu_handle_stat",
+              "ksu_handle_newfstat_ret",
+              "ksu_handle_faccessat",
+              "ksu_handle_sys_reboot",
+              "ksu_handle_sys_read",
+          ]
+
+          source_files = [
+              ROOT / "fs/exec.c",
+              ROOT / "fs/stat.c",
+              ROOT / "fs/open.c",
+              ROOT / "kernel/reboot.c",
+              ROOT / "fs/read_write.c",
+          ]
+
+          for symbol in required:
+              if not any(symbol in read(path) for path in source_files):
+                  raise RuntimeError(
+                      f"Missing ReSukiSU hook: {symbol}"
+                  )
+
+          stat_text = read(ROOT / "fs/stat.c")
+
+          if "ksu_handle_stat(&dfd, &filename, &flag);" not in stat_text:
+              raise RuntimeError(
+                  "Native stat hook was not inserted"
+              )
+
+          print("ReSukiSU manual hooks validated.")
+          PY
+
+          git diff --check
+
+      - name: Configure kernel
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          unset CROSS_COMPILE_ARM32
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m \
+            -r \
+            -O out \
+            out/.config \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          cat > out/resukisu.config <<'EOF'
+          CONFIG_KSU=y
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_MANUAL_HOOK=y
+
+          CONFIG_COMPAT=y
+          # CONFIG_COMPAT_VDSO is not set
+          # CONFIG_VDSO32 is not set
+
+          CONFIG_NOMOUNT=y
+          EOF
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m \
+            -r \
+            -O out \
+            out/.config \
+            out/resukisu.config
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+      - name: Validate kernel configuration
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG=out/.config
+
+          grep -q '^CONFIG_KSU=y$' "$CONFIG"
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CONFIG"
+          grep -q '^CONFIG_COMPAT=y$' "$CONFIG"
+          grep -q '^CONFIG_MODULES=y$' "$CONFIG"
+          grep -q '^CONFIG_LTO_CLANG=y$' "$CONFIG"
+          grep -q '^CONFIG_CFI_CLANG=y$' "$CONFIG"
+          grep -q '^CONFIG_SHADOW_CALL_STACK=y$' "$CONFIG"
+          grep -q '^CONFIG_KALLSYMS_ALL=y$' "$CONFIG"
+          grep -q '^CONFIG_GTA4L_DTB=y$' "$CONFIG"
+          grep -q '^CONFIG_NOMOUNT=y$' "$CONFIG"
+
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$CONFIG"; then
+            echo "ERROR: Tracepoint hook mode is enabled"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_COMPAT_VDSO=y$' "$CONFIG"; then
+            echo "ERROR: CONFIG_COMPAT_VDSO=y"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_VDSO32=y$' "$CONFIG"; then
+            echo "ERROR: CONFIG_VDSO32=y"
+            exit 1
+          fi
+
+      - name: Build kernel
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export PATH="$PWD/prebuilts-master/clang/host/linux-x86/clang-r416183b/bin:$PATH"
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image \
+            Image.gz
+
+      - name: Verify kernel artifacts
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          test -f out/arch/arm64/boot/Image
+          test -f out/arch/arm64/boot/Image.gz
+          test -f out/vmlinux
+          test -f out/System.map
+
+      - name: Package kernel artifacts
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          cp out/arch/arm64/boot/Image \
+            artifacts/Image
+
+          cp out/arch/arm64/boot/Image.gz \
+            artifacts/Image.gz
+
+          cp out/vmlinux \
+            artifacts/vmlinux
+
+          cp out/System.map \
+            artifacts/System.map
+
+          cp out/.config \
+            artifacts/kernel.config
+
+          tar -czf artifacts/resukisu-nomount-sm6115-gta4l.tar.gz \
+            -C artifacts \
+            Image \
+            Image.gz \
+            vmlinux \
+            System.map \
+            kernel.config
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resukisu-nomount-sm6115-gta4l
+          path: kernel/artifacts/
+          if-no-files-found: error
