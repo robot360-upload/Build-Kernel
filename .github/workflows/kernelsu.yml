@@ -1,0 +1,767 @@
+name: KSU Next Manual - SM6115 GTA4L
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build KSU Next Manual
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ============================================================
+      # 1. DEPENDENCIES
+      # ============================================================
+
+      - name: "01 - Install dependencies"
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Installing build dependencies"
+          echo "========================================"
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip
+
+          echo
+          echo "Dependency installation completed."
+
+
+      # ============================================================
+      # 2. CLONE KERNEL
+      # ============================================================
+
+      - name: "02 - Clone LineageOS SM6115 kernel"
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Cloning kernel"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
+            --branch lineage-23.2 \
+            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            kernel
+
+          cd kernel
+
+          echo
+          echo "Kernel commit:"
+          git log -1 --oneline
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+
+      # ============================================================
+      # 3. CLONE CLANG
+      # ============================================================
+
+      - name: "03 - Clone LineageOS Clang r416183b"
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Cloning LineageOS Clang"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
+            --branch lineage-20.0 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            clang
+
+          echo
+          echo "Clang version:"
+          clang/bin/clang --version
+
+
+      # ============================================================
+      # 4. ADD KERNELSU NEXT
+      # ============================================================
+
+      - name: "04 - Add KernelSU Next legacy"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Installing KernelSU Next"
+          echo "========================================"
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s legacy
+
+          echo
+          echo "KernelSU directory:"
+          ls -la KernelSU
+
+          echo
+          echo "KernelSU Makefile:"
+          test -f KernelSU/kernel/Makefile
+          head -40 KernelSU/kernel/Makefile
+
+          echo
+          echo "KernelSU Kconfig:"
+          test -f KernelSU/kernel/Kconfig
+
+
+      # ============================================================
+      # 5. VERIFY CLEAN KERNELSU TREE
+      # ============================================================
+
+      - name: "05 - Verify KernelSU integration"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Checking KernelSU integration"
+          echo "========================================"
+
+          test -L drivers/kernelsu
+
+          echo
+          echo "drivers/kernelsu:"
+          readlink -f drivers/kernelsu
+
+          echo
+          echo "drivers/Makefile entry:"
+          grep -n "kernelsu" drivers/Makefile
+
+          echo
+          echo "drivers/Kconfig entry:"
+          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
+
+
+      # ============================================================
+      # 6. INSPECT EXACT 4.19 HOOK LOCATIONS
+      # ============================================================
+
+      - name: "06 - Inspect hook locations"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Inspecting kernel hook locations"
+          echo "========================================"
+
+          echo
+          echo "===== fs/exec.c ====="
+          grep -n -A12 -B8 \
+            "int do_execve(struct filename" \
+            fs/exec.c
+
+          echo
+          echo "===== fs/open.c ====="
+          grep -n -A35 -B8 \
+            "faccessat" \
+            fs/open.c | head -60
+
+          echo
+          echo "===== fs/read_write.c ====="
+          grep -n -A15 -B8 \
+            "SYSCALL_DEFINE3(read" \
+            fs/read_write.c
+
+          echo
+          echo "===== fs/stat.c ====="
+          grep -n -A18 -B8 \
+            "SYSCALL_DEFINE4(newfstatat" \
+            fs/stat.c
+
+          echo
+          echo "===== kernel/reboot.c ====="
+          grep -n -A25 -B8 \
+            "SYSCALL_DEFINE4(reboot" \
+            kernel/reboot.c
+
+
+      # ============================================================
+      # 7. APPLY EXEC HOOK
+      # ============================================================
+
+      - name: "07 - Apply KSU hook: fs/exec.c"
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          p = Path("fs/exec.c")
+          s = p.read_text()
+
+          print("Patching fs/exec.c...")
+
+          if "ksu_handle_execveat" in s:
+              print("ksu_handle_execveat already exists.")
+              raise SystemExit(0)
+
+          declaration = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                                          void *argv, void *envp, int *flags);
+          #endif
+          '''
+
+          target = """int do_execve(struct filename *filename,"""
+
+          if target not in s:
+              raise RuntimeError(
+                  "ERROR: do_execve() target was not found."
+              )
+
+          s = s.replace(
+              target,
+              declaration + "\n" + target,
+              1
+          )
+
+          old = """\tstruct user_arg_ptr argv = { .ptr.native = __argv };
+  \tstruct user_arg_ptr envp = { .ptr.native = __envp };
+  \treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);"""
+
+          new = """\tstruct user_arg_ptr argv = { .ptr.native = __argv };
+  \tstruct user_arg_ptr envp = { .ptr.native = __envp };
+  #ifdef CONFIG_KSU
+  \tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+  #endif
+  \treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);"""
+
+          if old not in s:
+              raise RuntimeError(
+                  "ERROR: expected do_execve() body was not found."
+              )
+
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          print("fs/exec.c patched successfully.")
+
+
+      # ============================================================
+      # 8. APPLY OPEN HOOK
+      # ============================================================
+
+      - name: "08 - Apply KSU hook: fs/open.c"
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          p = Path("fs/open.c")
+          s = p.read_text()
+
+          print("Patching fs/open.c...")
+
+          if "ksu_handle_faccessat" in s:
+              print("ksu_handle_faccessat already exists.")
+              raise SystemExit(0)
+
+          declaration = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(int *dfd,
+                                          const char __user **filename_user,
+                                          int *mode, int *flags);
+          #endif
+          '''
+
+          marker = """SYSCALL_DEFINE3(faccessat,"""
+
+          if marker not in s:
+              raise RuntimeError(
+                  "ERROR: faccessat syscall was not found."
+              )
+
+          s = s.replace(
+              marker,
+              declaration + "\n" + marker,
+              1
+          )
+
+          body_marker = """\tint res;"""
+
+          pos = s.find(marker)
+
+          if pos == -1:
+              raise RuntimeError("ERROR: faccessat location disappeared.")
+
+          body_pos = s.find(body_marker, pos)
+
+          if body_pos == -1:
+              raise RuntimeError(
+                  "ERROR: faccessat body marker was not found."
+              )
+
+          insertion = r'''
+          #ifdef CONFIG_KSU
+          \tksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif
+          '''
+
+          s = (
+              s[:body_pos]
+              + insertion
+              + "\n"
+              + s[body_pos:]
+          )
+
+          p.write_text(s)
+
+          print("fs/open.c patched successfully.")
+
+
+      # ============================================================
+      # 9. APPLY READ HOOK
+      # ============================================================
+
+      - name: "09 - Apply KSU hook: fs/read_write.c"
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          p = Path("fs/read_write.c")
+          s = p.read_text()
+
+          print("Patching fs/read_write.c...")
+
+          if "ksu_handle_sys_read" in s:
+              print("ksu_handle_sys_read already exists.")
+              raise SystemExit(0)
+
+          declaration = r'''
+          #ifdef CONFIG_KSU
+          extern bool ksu_vfs_read_hook __read_mostly;
+          extern __attribute__((cold)) int ksu_handle_sys_read(
+                  unsigned int fd,
+                  char __user **buf_ptr,
+                  size_t *count_ptr);
+          #endif
+          '''
+
+          marker = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"""
+
+          if marker not in s:
+              raise RuntimeError(
+                  "ERROR: read syscall target was not found."
+              )
+
+          s = s.replace(
+              marker,
+              declaration + "\n" + marker,
+              1
+          )
+
+          old = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+  {
+  \treturn ksys_read(fd, buf, count);
+  }"""
+
+          new = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+  {
+  #ifdef CONFIG_KSU
+  \tif (unlikely(ksu_vfs_read_hook))
+  \t\tksu_handle_sys_read(fd, (char __user **)&buf, &count);
+  #endif
+  \treturn ksys_read(fd, buf, count);
+  }"""
+
+          if old not in s:
+              raise RuntimeError(
+                  "ERROR: expected read() body was not found."
+              )
+
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          print("fs/read_write.c patched successfully.")
+
+
+      # ============================================================
+      # 10. APPLY STAT HOOK
+      # ============================================================
+
+      - name: "10 - Apply KSU hook: fs/stat.c"
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          p = Path("fs/stat.c")
+          s = p.read_text()
+
+          print("Patching fs/stat.c...")
+
+          if "ksu_handle_stat" in s:
+              print("ksu_handle_stat already exists.")
+              raise SystemExit(0)
+
+          declaration = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_stat(int *dfd,
+                                     const char __user **filename_user,
+                                     int *flags);
+          #endif
+          '''
+
+          marker = """#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)"""
+
+          if marker not in s:
+              raise RuntimeError(
+                  "ERROR: newfstatat preprocessor section was not found."
+              )
+
+          s = s.replace(
+              marker,
+              declaration + "\n" + marker,
+              1
+          )
+
+          old = """\tstruct kstat stat;
+  \tint error;
+
+  \terror = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          new = """\tstruct kstat stat;
+  \tint error;
+
+  #ifdef CONFIG_KSU
+  \tksu_handle_stat(&dfd, &filename, &flag);
+  #endif
+
+  \terror = vfs_fstatat(dfd, filename, &stat, flag);"""
+
+          if old not in s:
+              raise RuntimeError(
+                  "ERROR: expected newfstatat body was not found."
+              )
+
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          print("fs/stat.c patched successfully.")
+
+
+      # ============================================================
+      # 11. APPLY REBOOT HOOK
+      # ============================================================
+
+      - name: "11 - Apply KSU hook: kernel/reboot.c"
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          p = Path("kernel/reboot.c")
+          s = p.read_text()
+
+          print("Patching kernel/reboot.c...")
+
+          if "ksu_handle_sys_reboot" in s:
+              print("ksu_handle_sys_reboot already exists.")
+              raise SystemExit(0)
+
+          declaration = r'''
+          #ifdef CONFIG_KSU
+          extern int ksu_handle_sys_reboot(int magic1, int magic2,
+                                            unsigned int cmd,
+                                            void __user **arg);
+          #endif
+          '''
+
+          marker = """SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"""
+
+          if marker not in s:
+              raise RuntimeError(
+                  "ERROR: reboot syscall target was not found."
+              )
+
+          s = s.replace(
+              marker,
+              declaration + "\n" + marker,
+              1
+          )
+
+          old = """\tint ret = 0;
+
+  \t/* We only trust the superuser with rebooting the system. */"""
+
+          new = """\tint ret = 0;
+
+  #ifdef CONFIG_KSU
+  \tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+  #endif
+
+  \t/* We only trust the superuser with rebooting the system. */"""
+
+          if old not in s:
+              raise RuntimeError(
+                  "ERROR: expected reboot() body was not found."
+              )
+
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          print("kernel/reboot.c patched successfully.")
+
+
+      # ============================================================
+      # 12. SHOW ALL MODIFICATIONS
+      # ============================================================
+
+      - name: "12 - Verify all manual hooks"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " KernelSU manual hook verification"
+          echo "========================================"
+
+          echo
+          echo "----- exec.c -----"
+          grep -n -A5 -B3 \
+            "ksu_handle_execveat" \
+            fs/exec.c
+
+          echo
+          echo "----- open.c -----"
+          grep -n -A5 -B3 \
+            "ksu_handle_faccessat" \
+            fs/open.c
+
+          echo
+          echo "----- read_write.c -----"
+          grep -n -A6 -B3 \
+            "ksu_handle_sys_read" \
+            fs/read_write.c
+
+          echo
+          echo "----- stat.c -----"
+          grep -n -A5 -B3 \
+            "ksu_handle_stat" \
+            fs/stat.c
+
+          echo
+          echo "----- reboot.c -----"
+          grep -n -A5 -B3 \
+            "ksu_handle_sys_reboot" \
+            kernel/reboot.c
+
+          echo
+          echo "========================================"
+          echo " All five KSU hooks are present."
+          echo "========================================"
+
+
+      # ============================================================
+      # 13. CONFIGURE
+      # ============================================================
+
+      - name: "13 - Configure kernel"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+
+          unset CROSS_COMPILE
+          unset CROSS_COMPILE_ARM32
+
+          echo "========================================"
+          echo " Generating SM6115 configuration"
+          echo "========================================"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          KCONFIG_CONFIG="$PWD/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m -r \
+            -O out \
+            out/.config \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU \
+            --disable CONFIG_KPROBES \
+            --disable CONFIG_KPROBE_EVENTS
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+
+      # ============================================================
+      # 14. CONFIG VERIFICATION
+      # ============================================================
+
+      - name: "14 - Verify final configuration"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo " Final kernel configuration"
+          echo "========================================"
+
+          echo
+          echo "KernelSU:"
+          grep '^CONFIG_KSU=' out/.config
+
+          echo
+          echo "KPROBES:"
+          grep -E \
+            '^# CONFIG_(KPROBES|KPROBE_EVENTS) is not set' \
+            out/.config
+
+          echo
+          echo "Important existing options:"
+          grep -E \
+            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_KALLSYMS_ALL|CONFIG_GTA4L_DTB)=' \
+            out/.config
+
+          echo
+          echo "vDSO:"
+          grep -E \
+            '^# CONFIG_(COMPAT_VDSO|VDSO32) is not set' \
+            out/.config || true
+
+
+      # ============================================================
+      # 15. BUILD
+      # ============================================================
+
+      - name: "15 - Build kernel"
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+
+          unset CROSS_COMPILE
+          unset CROSS_COMPILE_ARM32
+
+          echo "========================================"
+          echo " Building KernelSU Next kernel"
+          echo "========================================"
+
+          make \
+            -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image \
+            Image.gz
+
+          echo
+          echo "========================================"
+          echo " BUILD SUCCESS"
+          echo "========================================"
+
+          ls -lh \
+            out/arch/arm64/boot/Image \
+            out/arch/arm64/boot/Image.gz
+
+
+      # ============================================================
+      # 16. FINAL INFORMATION
+      # ============================================================
+
+      - name: "16 - Print final build information"
+        if: always()
+        working-directory: kernel
+        shell: bash
+        run: |
+          echo "========================================"
+          echo " FINAL BUILD INFORMATION"
+          echo "========================================"
+
+          echo
+          echo "Kernel version:"
+          make O=out kernelversion || true
+
+          echo
+          echo "KernelSU version:"
+          grep -R \
+            -E \
+            'KSU_VERSION|KSU_VERSION_CODE' \
+            KernelSU/kernel \
+            --include='Makefile' \
+            --include='*.h' \
+            2>/dev/null | head -20 || true
+
+          echo
+          echo "Images:"
+          ls -lh \
+            out/arch/arm64/boot/Image \
+            out/arch/arm64/boot/Image.gz \
+            2>/dev/null || true
+
+
+      # ============================================================
+      # 17. UPLOAD ARTIFACTS
+      # ============================================================
+
+      - name: "17 - Upload kernel artifacts"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta4l-ksunext-manual
+          retention-days: 14
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/.config
