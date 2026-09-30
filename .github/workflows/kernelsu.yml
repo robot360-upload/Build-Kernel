@@ -74,7 +74,26 @@ jobs:
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
-          test -d KernelSU
+          echo "=== Verify KernelSU-Next integration ==="
+
+          test -d KernelSU-Next
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+
+          echo "KernelSU-Next directory:"
+          ls -ld KernelSU-Next
+
+          echo "KernelSU driver symlink:"
+          ls -l drivers/kernelsu
+
+          echo "KernelSU Kconfig:"
+          ls -l drivers/kernelsu/Kconfig
+
+          echo "KernelSU Makefile entry:"
+          grep -n "kernelsu" drivers/Makefile
+
+          echo "KernelSU Kconfig entry:"
+          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
           test -f KernelSU/kernel/Kconfig
 
           echo "KernelSU Next successfully added."
