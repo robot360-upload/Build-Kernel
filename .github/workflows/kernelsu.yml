@@ -77,26 +77,35 @@ jobs:
           echo "=== Verify KernelSU-Next integration ==="
 
           test -d KernelSU-Next
+          test -d KernelSU-Next/kernel
+          test -f KernelSU-Next/kernel/Kconfig
+          test -f KernelSU-Next/kernel/Makefile
+
           test -L drivers/kernelsu
           test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
 
-          echo "KernelSU-Next directory:"
+          echo "=== KernelSU-Next directory ==="
           ls -ld KernelSU-Next
+          ls -ld KernelSU-Next/kernel
 
-          echo "KernelSU driver symlink:"
+          echo "=== KernelSU driver symlink ==="
           ls -l drivers/kernelsu
 
-          echo "KernelSU Kconfig:"
+          echo "=== KernelSU Kconfig ==="
           ls -l drivers/kernelsu/Kconfig
 
-          echo "KernelSU Makefile entry:"
+          echo "=== KernelSU Makefile entry ==="
           grep -n "kernelsu" drivers/Makefile
 
-          echo "KernelSU Kconfig entry:"
+          echo "=== KernelSU Kconfig entry ==="
           grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
-          test -f KernelSU/kernel/Kconfig
 
-          echo "KernelSU Next successfully added."
+          echo "=== KernelSU-Next files ==="
+          test -f KernelSU-Next/kernel/Kconfig
+          test -f KernelSU-Next/kernel/Makefile
+
+          echo "KernelSU-Next successfully added."
 
       - name: "05 - Verify KernelSU integration"
         working-directory: kernel
