@@ -1,0 +1,542 @@
+name: Build KernelSU-Next Manual - SM6115 GTA4L
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 \
+            --branch lineage-23.2 \
+            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            kernel
+
+      - name: Clone LineageOS clang
+        run: |
+          git clone --depth=1 \
+            --branch lineage-20.0 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            clang
+
+      - name: Add KernelSU-Next legacy
+        working-directory: kernel
+        run: |
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s legacy
+
+      - name: Inspect kernel hook locations
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+          echo
+          echo "===== EXEC ====="
+          grep -n -E \
+            'do_execve\(|compat_do_execve\(' \
+            fs/exec.c | head -20
+
+          echo
+          echo "===== FACCESAT ====="
+          grep -n \
+            'SYSCALL_DEFINE3(faccessat' \
+            fs/open.c
+
+          echo
+          echo "===== READ ====="
+          grep -n \
+            'SYSCALL_DEFINE3(read' \
+            fs/read_write.c
+
+          echo
+          echo "===== STAT ====="
+          grep -n -E \
+            'SYSCALL_DEFINE4\(newfstatat|SYSCALL_DEFINE[0-9].*fstat' \
+            fs/stat.c | head -30
+
+          echo
+          echo "===== REBOOT ====="
+          grep -n \
+            'SYSCALL_DEFINE4(reboot' \
+            kernel/reboot.c
+
+      - name: Validate expected 4.19 source layout
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          test -f fs/exec.c
+          test -f fs/open.c
+          test -f fs/read_write.c
+          test -f fs/stat.c
+          test -f kernel/reboot.c
+
+          grep -q 'SYSCALL_DEFINE3(faccessat' fs/open.c
+          grep -q 'SYSCALL_DEFINE3(read' fs/read_write.c
+          grep -q 'SYSCALL_DEFINE4(newfstatat' fs/stat.c
+          grep -q 'SYSCALL_DEFINE4(reboot' kernel/reboot.c
+
+          echo "Required 4.19 hook targets found."
+
+      - name: Apply KernelSU-Next manual hooks
+        working-directory: kernel
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          files = {
+              "fs/exec.c": Path("fs/exec.c").read_text(),
+              "fs/open.c": Path("fs/open.c").read_text(),
+              "fs/read_write.c": Path("fs/read_write.c").read_text(),
+              "fs/stat.c": Path("fs/stat.c").read_text(),
+              "kernel/reboot.c": Path("kernel/reboot.c").read_text(),
+          }
+
+          # ------------------------------------------------------------
+          # fs/exec.c
+          # ------------------------------------------------------------
+
+          p = Path("fs/exec.c")
+          s = files["fs/exec.c"]
+
+          exec_decl = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                                         void *argv, void *envp, int *flags);
+          #endif
+          '''
+
+          target = """int do_execve(struct filename *filename,"""
+
+          if "ksu_handle_execveat" not in s:
+              if target not in s:
+                  raise SystemExit(
+                      "ERROR: expected do_execve() target not found in fs/exec.c"
+                  )
+
+              s = s.replace(
+                  target,
+                  exec_decl + "\n" + target,
+                  1
+              )
+
+              old = """\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"""
+
+              new = old + r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+          #endif
+          '''
+
+              if old not in s:
+                  raise SystemExit(
+                      "ERROR: do_execve() body signature changed; refusing to patch"
+                  )
+
+              s = s.replace(old, new, 1)
+
+          # compat_do_execve
+          if "ksu_handle_execveat" in s:
+              compat_target = """static int compat_do_execve(struct filename *filename,"""
+
+              if compat_target in s and \
+                 "ksu_handle_execveat((int *)AT_FDCWD" not in s[s.find(compat_target):]:
+                  start = s.find(compat_target)
+                  end = s.find("\n}", start)
+
+                  body = s[start:end]
+
+                  marker = """\t};\n"""
+
+                  pos = body.find(marker)
+                  if pos != -1:
+                      absolute = start + pos + len(marker)
+
+                      hook = r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+          #endif
+          '''
+
+                      s = s[:absolute] + hook + s[absolute:]
+
+          p.write_text(s)
+
+          # ------------------------------------------------------------
+          # fs/open.c
+          # ------------------------------------------------------------
+
+          p = Path("fs/open.c")
+          s = files["fs/open.c"]
+
+          if "ksu_handle_faccessat" not in s:
+              decl = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_faccessat(int *dfd,
+                                          const char __user **filename_user,
+                                          int *mode, int *flags);
+          #endif
+          '''
+
+              target = """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)"""
+
+              if target not in s:
+                  raise SystemExit(
+                      "ERROR: faccessat target not found in fs/open.c"
+                  )
+
+              s = s.replace(
+                  target,
+                  decl + "\n" + target,
+                  1
+              )
+
+              marker = """\tint res;\n"""
+              replacement = marker + r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif
+          '''
+
+              if marker not in s:
+                  raise SystemExit(
+                      "ERROR: faccessat body marker not found"
+                  )
+
+              # Only replace the first occurrence.
+              s = s.replace(marker, replacement, 1)
+
+          p.write_text(s)
+
+          # ------------------------------------------------------------
+          # fs/read_write.c
+          # ------------------------------------------------------------
+
+          p = Path("fs/read_write.c")
+          s = files["fs/read_write.c"]
+
+          if "ksu_handle_sys_read" not in s:
+              decl = r'''
+          #ifdef CONFIG_KSU
+          extern bool ksu_vfs_read_hook __read_mostly;
+          extern __attribute__((cold))
+          int ksu_handle_sys_read(unsigned int fd,
+                                  char __user **buf_ptr,
+                                  size_t *count_ptr);
+          #endif
+          '''
+
+              target = """SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"""
+
+              if target not in s:
+                  raise SystemExit(
+                      "ERROR: read syscall target not found"
+                  )
+
+              s = s.replace(
+                  target,
+                  decl + "\n" + target,
+                  1
+              )
+
+              marker = """\tssize_t ret = -EBADF;\n"""
+
+              replacement = marker + r'''
+          #ifdef CONFIG_KSU
+              if (unlikely(ksu_vfs_read_hook))
+                  ksu_handle_sys_read(fd, (char __user **)&buf, &count);
+          #endif
+          '''
+
+              if marker not in s:
+                  raise SystemExit(
+                      "ERROR: read body marker not found"
+                  )
+
+              s = s.replace(marker, replacement, 1)
+
+          p.write_text(s)
+
+          # ------------------------------------------------------------
+          # fs/stat.c
+          # ------------------------------------------------------------
+
+          p = Path("fs/stat.c")
+          s = files["fs/stat.c"]
+
+          if "ksu_handle_stat" not in s:
+              decl = r'''
+          #ifdef CONFIG_KSU
+          __attribute__((hot))
+          extern int ksu_handle_stat(int *dfd,
+                                     const char __user **filename_user,
+                                     int *flags);
+          #endif
+          '''
+
+              target = """SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,"""
+
+              if target not in s:
+                  raise SystemExit(
+                      "ERROR: newfstatat target not found in fs/stat.c"
+                  )
+
+              s = s.replace(
+                  target,
+                  decl + "\n" + target,
+                  1
+              )
+
+              marker = """\tint error;\n"""
+
+              replacement = marker + r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_stat(&dfd, &filename, &flag);
+          #endif
+          '''
+
+              # Make sure this occurs after newfstatat.
+              pos = s.find(target)
+              marker_pos = s.find(marker, pos)
+
+              if marker_pos == -1:
+                  raise SystemExit(
+                      "ERROR: newfstatat body marker not found"
+                  )
+
+              marker_end = marker_pos + len(marker)
+
+              s = s[:marker_end] + replacement[len(marker):] + s[marker_end:]
+
+          p.write_text(s)
+
+          # ------------------------------------------------------------
+          # kernel/reboot.c
+          # ------------------------------------------------------------
+
+          p = Path("kernel/reboot.c")
+          s = files["kernel/reboot.c"]
+
+          if "ksu_handle_sys_reboot" not in s:
+              decl = r'''
+          #ifdef CONFIG_KSU
+          extern int ksu_handle_sys_reboot(int magic1, int magic2,
+                                           unsigned int cmd,
+                                           void __user **arg);
+          #endif
+          '''
+
+              target = """SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"""
+
+              if target not in s:
+                  raise SystemExit(
+                      "ERROR: reboot syscall target not found"
+                  )
+
+              s = s.replace(
+                  target,
+                  decl + "\n" + target,
+                  1
+              )
+
+              marker = """\tint ret = 0;\n"""
+
+              replacement = marker + r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+          #endif
+          '''
+
+              # Only insert into reboot(), not another function.
+              pos = s.find(target)
+              marker_pos = s.find(marker, pos)
+
+              if marker_pos == -1:
+                  raise SystemExit(
+                      "ERROR: reboot body marker not found"
+                  )
+
+              marker_end = marker_pos + len(marker)
+
+              s = s[:marker_end] + replacement[len(marker):] + s[marker_end:]
+
+          p.write_text(s)
+
+          print("Manual KernelSU-Next hook insertion completed.")
+
+      - name: Verify hooks
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== KSU HOOKS ====="
+
+          grep -n "ksu_handle_execveat" fs/exec.c
+          grep -n "ksu_handle_faccessat" fs/open.c
+          grep -n "ksu_handle_sys_read" fs/read_write.c
+          grep -n "ksu_handle_stat" fs/stat.c
+          grep -n "ksu_handle_sys_reboot" kernel/reboot.c
+
+          echo
+          echo "===== KSU SOURCE ====="
+          test -d KernelSU
+          test -f KernelSU/kernel/Kconfig
+
+      - name: Configure kernel
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          unset CROSS_COMPILE_ARM32
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            vendor/bengal-perf_defconfig
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m -r \
+            -O out \
+            out/.config \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_COMPAT \
+            --disable CONFIG_COMPAT_VDSO \
+            --disable CONFIG_VDSO32 \
+            --disable CONFIG_KPROBES \
+            --disable CONFIG_KPROBE_EVENTS \
+            --disable CONFIG_KSU_KPROBE_HOOKS
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+      - name: Validate final config
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== KSU ====="
+          grep '^CONFIG_KSU=' out/.config
+
+          echo "===== COMPAT ====="
+          grep '^CONFIG_COMPAT=' out/.config
+
+          echo "===== KPROBES ====="
+          grep -E '^# CONFIG_(KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set' \
+            out/.config
+
+          echo "===== EXISTING SM6115 CONFIG ====="
+          grep -E \
+            '^(CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_KALLSYMS_ALL|CONFIG_MODULES|CONFIG_GTA4L_DTB)=' \
+            out/.config
+
+      - name: Build Image and Image.gz
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          unset CROSS_COMPILE_ARM32
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image \
+            Image.gz
+
+      - name: Show build information
+        working-directory: kernel
+        run: |
+          echo "===== IMAGE ====="
+          ls -lh out/arch/arm64/boot/Image
+
+          echo
+          echo "===== IMAGE.GZ ====="
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== FILE ====="
+          file out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== KERNEL VERSION ====="
+          make O=out kernelversion
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+
+          cp kernel/out/arch/arm64/boot/Image \
+            artifacts/gta4l-ksunext-manual-Image
+
+          cp kernel/out/arch/arm64/boot/Image.gz \
+            artifacts/gta4l-ksunext-manual-Image.gz
+
+          cp kernel/out/.config \
+            artifacts/gta4l-ksunext-manual.config
+
+          tar -czf artifacts/gta4l-ksunext-manual-source-info.tar.gz \
+            -C kernel \
+            KernelSU \
+            fs/exec.c \
+            fs/open.c \
+            fs/read_write.c \
+            fs/stat.c \
+            kernel/reboot.c
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta4l-ksunext-manual
+          path: artifacts/
+          retention-days: 14
