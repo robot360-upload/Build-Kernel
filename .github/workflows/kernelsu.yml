@@ -1,4 +1,4 @@
-name: Build KernelSU-Next SM6115 Kernel - GTA4L
+name: Build1 KernelSU-Next SM6115 Kernel - GTA4L
 
 on:
   workflow_dispatch:
@@ -8,95 +8,66 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
+          set -euo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
             build-essential \
-            ccache \
             flex \
             git \
             libelf-dev \
-            libssl-dev \
             lld \
-            make \
             python3 \
             rsync \
-            unzip \
-            wget \
             xz-utils \
-            zip \
             zstd
 
       - name: Verify build environment
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "PATH=$PATH"
+
           command -v make
+          command -v git
+          command -v python3
+
           make --version
-          command -v clang
           git --version
-          
-      - name: Clone kernel source
+          python3 --version
+
+      - name: Checkout kernel source
         run: |
+          set -euo pipefail
+
           git clone --depth=1 \
             --branch lineage-23.2 \
             https://github.com/robot360-upload/android_kernel_samsung_sm6115.git \
             kernel
 
-      - name: Clone LineageOS clang
+      - name: Checkout LineageOS clang
+        working-directory: kernel
         run: |
+          set -euo pipefail
+
+          mkdir -p prebuilts-master/clang/host/linux-x86
+
           git clone --depth=1 \
             --branch lineage-20.0 \
             https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
-            clang
+            prebuilts-master/clang/host/linux-x86/clang-r416183b
 
-      - name: Clone KernelSU-Next
+      - name: Verify manual KernelSU-Next hooks
         working-directory: kernel
         run: |
-          git clone \
-            --depth=1 \
-            https://github.com/KernelSU-Next/KernelSU-Next.git \
-            KernelSU-Next
+          set -euo pipefail
 
-          echo "KernelSU-Next revision:"
-          cd KernelSU-Next
-          git rev-parse HEAD
-          git describe --tags --always || true
-
-      - name: Integrate KernelSU-Next
-        working-directory: kernel
-        run: |
-          set -e
-
-          echo "=== Creating KernelSU driver symlink ==="
-
-          ln -s ../KernelSU-Next/kernel drivers/kernelsu
-
-          echo "=== Adding KernelSU to drivers/Makefile ==="
-
-          grep -qxF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
-          echo "=== Adding KernelSU to drivers/Kconfig ==="
-
-          grep -qxF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-
-          echo "=== Verifying integration ==="
-
-          ls -l drivers/kernelsu
-
-          grep -n "kernelsu" drivers/Makefile
-          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
-
-      - name: Verify manual hooks
-        working-directory: kernel
-        run: |
-          set -e
-
-          echo "=== Checking KernelSU manual hooks ==="
+          echo "=== Checking KernelSU-Next manual hooks ==="
 
           grep -n "ksu_handle_execveat" fs/exec.c
           grep -n "ksu_handle_faccessat" fs/open.c
@@ -105,19 +76,69 @@ jobs:
           grep -n "ksu_handle_stat" fs/stat.c
           grep -n "ksu_handle_sys_reboot" kernel/reboot.c
 
-          echo "=== Hook check completed ==="
+          echo
+          echo "=== Hook verification complete ==="
 
-      - name: Prepare output directory
+      - name: Install KernelSU-Next
         working-directory: kernel
         run: |
-          mkdir -p out
+          set -euo pipefail
+
+          git clone \
+            --depth=1 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
+
+          rm -rf drivers/kernelsu
+
+          ln -s ../KernelSU-Next/kernel drivers/kernelsu
+
+          echo "=== KernelSU-Next revision ==="
+
+          cd KernelSU-Next
+
+          git rev-parse HEAD
+
+          git describe --tags --always || true
+
+      - name: Register KernelSU-Next in kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          makefile = Path("drivers/Makefile")
+          text = makefile.read_text()
+
+          entry = "obj-$(CONFIG_KSU) += kernelsu/"
+
+          if entry not in text:
+              text += "\n" + entry + "\n"
+              makefile.write_text(text)
+
+          kconfig = Path("drivers/Kconfig")
+          text = kconfig.read_text()
+
+          entry = 'source "drivers/kernelsu/Kconfig"'
+
+          if entry not in text:
+              text += "\n" + entry + "\n"
+              kconfig.write_text(text)
+
+          PY
+
+          echo "=== Registration ==="
+
+          grep -n "obj-\$(CONFIG_KSU).*kernelsu" drivers/Makefile
+          grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig
 
       - name: Configure kernel
         working-directory: kernel
+        shell: bash
         run: |
-          set -e
-
-          export PATH="${{ github.workspace }}/clang/bin:$PATH"
+          set -euo pipefail
 
           export ARCH=arm64
           export LLVM=1
@@ -126,12 +147,7 @@ jobs:
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          echo "PATH=$PATH"
-          echo "make: $(command -v make)"
-          echo "clang: $(command -v clang)"
-
-          make --version
-          clang --version
+          echo "=== Kernel defconfig ==="
 
           make O=out \
             ARCH=arm64 \
@@ -139,12 +155,123 @@ jobs:
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
-      - name: Build kernel
+          echo "=== Merge GTA4L configuration ==="
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m \
+            -r \
+            -O out \
+            out/.config \
+            arch/arm64/configs/vendor/gta4l-common.config
+
+          echo "=== KernelSU-Next configuration ==="
+
+          cat > out/kernelsu-next.config <<'EOF'
+          CONFIG_KSU=y
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_MANUAL_HOOK=y
+
+          CONFIG_COMPAT=y
+          # CONFIG_COMPAT_VDSO is not set
+          # CONFIG_VDSO32 is not set
+          EOF
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
+            ./scripts/kconfig/merge_config.sh \
+            -m \
+            -r \
+            -O out \
+            out/.config \
+            out/kernelsu-next.config
+
+          echo "=== Finalize configuration ==="
+
+          make O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+      - name: Validate KernelSU-Next configuration
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
-          export PATH="${{ github.workspace }}/clang/bin:$PATH"
+          CONFIG="out/.config"
+
+          echo "=== KernelSU configuration ==="
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_COMPAT=|CONFIG_COMPAT_VDSO|CONFIG_VDSO32)' \
+            "$CONFIG" || true
+
+          echo
+          echo "=== Existing kernel configuration ==="
+
+          grep -E \
+            '^(CONFIG_MODULES=|CONFIG_LTO_CLANG=|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_KALLSYMS_ALL=|CONFIG_GTA4L_DTB=)' \
+            "$CONFIG" || true
+
+          echo
+          echo "=== Assertions ==="
+
+          grep -q '^CONFIG_KSU=y$' "$CONFIG"
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$'
+          grep -q '^CONFIG_COMPAT=y$'
+          grep -q '^CONFIG_MODULES=y$'
+          grep -q '^CONFIG_LTO_CLANG=y$'
+          grep -q '^CONFIG_CFI_CLANG=y$'
+          grep -q '^CONFIG_SHADOW_CALL_STACK=y$'
+          grep -q '^CONFIG_KALLSYMS_ALL=y$'
+          grep -q '^CONFIG_GTA4L_DTB=y$'
+
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' "$CONFIG"; then
+            echo "ERROR: KSU tracepoint hook is enabled"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_COMPAT_VDSO=y$' "$CONFIG"; then
+            echo "ERROR: CONFIG_COMPAT_VDSO=y"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_VDSO32=y$' "$CONFIG"; then
+            echo "ERROR: CONFIG_VDSO32=y"
+            exit 1
+          fi
+
+          echo
+          echo "KernelSU-Next configuration validated."
+
+      - name: Check source changes
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+
+          git diff --check
+
+          echo "=== KernelSU-Next source ==="
+          test -L drivers/kernelsu
+          readlink drivers/kernelsu
+
+          echo
+          echo "=== Manual hooks ==="
+
+          grep -Rnw \
+            -e "ksu_handle_execveat" \
+            -e "ksu_handle_faccessat" \
+            -e "ksu_handle_sys_read" \
+            -e "ksu_handle_stat" \
+            -e "ksu_handle_sys_reboot" \
+            fs kernel \
+            --include='*.c'
+
+      - name: Build kernel
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
 
           export ARCH=arm64
           export LLVM=1
@@ -153,56 +280,74 @@ jobs:
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          echo "PATH=$PATH"
-          echo "make: $(command -v make)"
-          echo "clang: $(command -v clang)"
+          export PATH="$PWD/prebuilts-master/clang/host/linux-x86/clang-r416183b/bin:$PATH"
+
+          echo "=== Toolchain ==="
+
+          command -v make
+          command -v clang
 
           make --version
           clang --version
 
-          make -j$(nproc) \
+          echo
+          echo "=== Building Image and Image.gz ==="
+
+          make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            Image Image.gz
+            Image \
+            Image.gz
 
-      - name: Verify kernel outputs
+      - name: Verify kernel artifacts
         working-directory: kernel
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "=== Build outputs ==="
+          test -f out/arch/arm64/boot/Image
+          test -f out/arch/arm64/boot/Image.gz
 
+          echo "=== Image ==="
           ls -lh out/arch/arm64/boot/Image
-          ls -lh out/arch/arm64/boot/Image.gz
-
-          echo "=== File information ==="
-
           file out/arch/arm64/boot/Image
+
+          echo
+          echo "=== Image.gz ==="
+          ls -lh out/arch/arm64/boot/Image.gz
           file out/arch/arm64/boot/Image.gz
 
-          echo "=== KernelSU objects ==="
-
-          find out -path '*kernelsu*' -type f | head -50 || true
-
-      - name: Prepare artifacts
+      - name: Package artifacts
         working-directory: kernel
         run: |
+          set -euo pipefail
+
           mkdir -p artifacts
 
           cp out/arch/arm64/boot/Image \
-            artifacts/gta4l-kernelsu-next-Image
+            artifacts/Image
 
           cp out/arch/arm64/boot/Image.gz \
-            artifacts/gta4l-kernelsu-next-Image.gz
+            artifacts/Image.gz
+
+          cp out/vmlinux \
+            artifacts/vmlinux
+
+          cp out/System.map \
+            artifacts/System.map
 
           cp out/.config \
-            artifacts/gta4l-kernelsu-next.config
+            artifacts/kernel.config
 
-          cp System.map \
-            artifacts/gta4l-kernelsu-next-System.map \
-            2>/dev/null || true
+          tar -czf \
+            artifacts/kernelsu-next-sm6115-gta4l.tar.gz \
+            -C artifacts \
+            Image \
+            Image.gz \
+            vmlinux \
+            System.map \
+            kernel.config
 
           echo "=== Artifacts ==="
           ls -lh artifacts/
@@ -210,6 +355,6 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gta4l-kernelsu-next-kernel
+          name: kernelsu-next-sm6115-gta4l
           path: kernel/artifacts/
           if-no-files-found: error
