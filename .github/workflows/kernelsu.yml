@@ -114,10 +114,10 @@ jobs:
 
       - name: Configure kernel
         working-directory: kernel
-        env:
-          PATH: ${{ github.workspace }}/clang/bin:${{ env.PATH }}
         run: |
           set -e
+
+          export PATH="${{ github.workspace }}/clang/bin:$PATH"
 
           export ARCH=arm64
           export LLVM=1
@@ -126,7 +126,12 @@ jobs:
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          echo "=== Running vendor defconfig ==="
+          echo "PATH=$PATH"
+          echo "make: $(command -v make)"
+          echo "clang: $(command -v clang)"
+
+          make --version
+          clang --version
 
           make O=out \
             ARCH=arm64 \
@@ -134,54 +139,12 @@ jobs:
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
-          echo "=== Merging GTA4L configuration ==="
-
-          KCONFIG_CONFIG="${PWD}/out/.config" \
-            ./scripts/kconfig/merge_config.sh \
-            -m -r \
-            -O out \
-            out/.config \
-            arch/arm64/configs/vendor/gta4l-common.config
-
-          echo "=== Enabling KernelSU-Next ==="
-
-          ./scripts/config --file out/.config \
-            --enable KSU \
-            --disable KSU_TRACEPOINT_HOOK \
-            --enable KSU_MANUAL_HOOK
-
-          echo "=== Keeping required 32-bit compatibility ==="
-
-          ./scripts/config --file out/.config \
-            --enable COMPAT \
-            --disable COMPAT_VDSO \
-            --disable VDSO32
-
-          echo "=== KernelSU-Next configuration ==="
-
-          ./scripts/config --file out/.config \
-            --enable KSU
-
-          echo "=== Updating configuration ==="
-
-          make O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            olddefconfig
-
-          echo "=== Relevant configuration ==="
-
-          grep -E \
-            '^(CONFIG_KSU|CONFIG_COMPAT=|CONFIG_COMPAT_VDSO|CONFIG_VDSO32|CONFIG_MODULES=|CONFIG_LTO_CLANG=|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_KALLSYMS_ALL=|CONFIG_GTA4L_DTB=)' \
-            out/.config || true
-
       - name: Build kernel
         working-directory: kernel
-        env:
-          PATH: ${{ github.workspace }}/clang/bin:${{ env.PATH }}
         run: |
           set -e
+
+          export PATH="${{ github.workspace }}/clang/bin:$PATH"
 
           export ARCH=arm64
           export LLVM=1
@@ -190,7 +153,12 @@ jobs:
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          echo "=== Building Image and Image.gz ==="
+          echo "PATH=$PATH"
+          echo "make: $(command -v make)"
+          echo "clang: $(command -v clang)"
+
+          make --version
+          clang --version
 
           make -j$(nproc) \
             O=out \
