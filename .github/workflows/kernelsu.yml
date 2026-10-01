@@ -212,12 +212,23 @@ jobs:
           grep -E \
             '^(CONFIG_MODULES=|CONFIG_LTO_CLANG=|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_KALLSYMS_ALL=|CONFIG_GTA4L_DTB=)' \
             "$CONFIG" || true
+            
+          echo "=== Requested KernelSU config ==="
+          cat out/kernelsu-next.config
+
+          echo
+          echo "=== Final KernelSU config ==="
+          grep -E '^(CONFIG_KSU|# CONFIG_KSU)' "$CONFIG" || true
+
+          echo
+          echo "=== KernelSU symbols ==="
+          grep -E 'KSU|SUSFS' "$CONFIG" | head -50 || true
 
           echo
           echo "=== Assertions ==="
 
           grep -q '^CONFIG_KSU=y$' "$CONFIG"
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$'
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CONFIG"
           grep -q '^CONFIG_COMPAT=y$'
           grep -q '^CONFIG_MODULES=y$'
           grep -q '^CONFIG_LTO_CLANG=y$'
