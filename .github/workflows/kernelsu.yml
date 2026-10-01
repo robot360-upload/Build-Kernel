@@ -21,6 +21,7 @@ jobs:
             libelf-dev \
             libssl-dev \
             lld \
+            make \
             python3 \
             rsync \
             unzip \
@@ -29,6 +30,14 @@ jobs:
             zip \
             zstd
 
+      - name: Verify build environment
+        run: |
+          set -e
+          command -v make
+          make --version
+          command -v clang
+          git --version
+          
       - name: Clone kernel source
         run: |
           git clone --depth=1 \
