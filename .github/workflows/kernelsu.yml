@@ -1,23 +1,16 @@
-name: KSU Next Manual - SM6115 GTA4L
+name: Build KernelSU-Next SM6115 Kernel - GTA4L
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   build:
-    name: Build KSU Next Manual
     runs-on: ubuntu-24.04
 
     steps:
-      - name: "01 - Install dependencies"
+      - name: Install dependencies
         run: |
-          set -euxo pipefail
-
           sudo apt-get update
-
           sudo apt-get install -y \
             bc \
             bison \
@@ -33,414 +26,213 @@ jobs:
             unzip \
             wget \
             xz-utils \
-            zip
+            zip \
+            zstd
 
-      - name: "02 - Clone SM6115 kernel"
+      - name: Clone kernel source
         run: |
-          set -euxo pipefail
-
-          git clone \
-            --depth=1 \
+          git clone --depth=1 \
             --branch lineage-23.2 \
-            https://github.com/LineageOS/android_kernel_samsung_sm6115.git \
+            https://github.com/robot360-upload/android_kernel_samsung_sm6115.git \
             kernel
 
-          cd kernel
-
-          echo "Kernel commit:"
-          git log -1 --oneline
-
-          echo "Kernel version:"
-          make kernelversion
-
-      - name: "03 - Clone LineageOS Clang"
+      - name: Clone LineageOS clang
         run: |
-          set -euxo pipefail
-
-          git clone \
-            --depth=1 \
+          git clone --depth=1 \
             --branch lineage-20.0 \
             https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
             clang
 
-          ./clang/bin/clang --version
-
-      - name: "04 - Add KernelSU Next legacy"
+      - name: Clone KernelSU-Next
         working-directory: kernel
         run: |
-          set -euxo pipefail
+          git clone \
+            --depth=1 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
 
-          curl -LSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            | bash -s legacy
+          echo "KernelSU-Next revision:"
+          cd KernelSU-Next
+          git rev-parse HEAD
+          git describe --tags --always || true
 
-          echo "=== Verify KernelSU-Next integration ==="
+      - name: Integrate KernelSU-Next
+        working-directory: kernel
+        run: |
+          set -e
 
-          test -d KernelSU-Next
-          test -d KernelSU-Next/kernel
-          test -f KernelSU-Next/kernel/Kconfig
-          test -f KernelSU-Next/kernel/Makefile
+          echo "=== Creating KernelSU driver symlink ==="
 
-          test -L drivers/kernelsu
-          test -f drivers/kernelsu/Kconfig
-          test -f drivers/kernelsu/Makefile
+          ln -s ../KernelSU-Next/kernel drivers/kernelsu
 
-          echo "=== KernelSU-Next directory ==="
-          ls -ld KernelSU-Next
-          ls -ld KernelSU-Next/kernel
+          echo "=== Adding KernelSU to drivers/Makefile ==="
 
-          echo "=== KernelSU driver symlink ==="
+          grep -qxF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+
+          echo "=== Adding KernelSU to drivers/Kconfig ==="
+
+          grep -qxF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+
+          echo "=== Verifying integration ==="
+
           ls -l drivers/kernelsu
 
-          echo "=== KernelSU Kconfig ==="
-          ls -l drivers/kernelsu/Kconfig
-
-          echo "=== KernelSU Makefile entry ==="
           grep -n "kernelsu" drivers/Makefile
-
-          echo "=== KernelSU Kconfig entry ==="
           grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
 
-          echo "=== KernelSU-Next files ==="
-          test -f KernelSU-Next/kernel/Kconfig
-          test -f KernelSU-Next/kernel/Makefile
-
-          echo "KernelSU-Next successfully added."
-
-      - name: "05 - Verify KernelSU integration"
+      - name: Verify manual hooks
         working-directory: kernel
         run: |
-          set -euxo pipefail
+          set -e
 
-          echo "drivers/kernelsu:"
-          readlink -f drivers/kernelsu
+          echo "=== Checking KernelSU manual hooks ==="
 
-          echo
-          echo "drivers/Makefile:"
-          grep -n "kernelsu" drivers/Makefile
-
-          echo
-          echo "drivers/Kconfig:"
-          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
-
-      - name: "06 - Inspect kernel hook targets"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          echo "===== fs/exec.c ====="
-          grep -n "int do_execve(struct filename" fs/exec.c
-
-          echo
-          echo "===== fs/open.c ====="
-          grep -n "SYSCALL_DEFINE3(faccessat" fs/open.c
-
-          echo
-          echo "===== fs/read_write.c ====="
-          grep -n "SYSCALL_DEFINE3(read" fs/read_write.c
-
-          echo
-          echo "===== fs/stat.c ====="
-          grep -n "SYSCALL_DEFINE4(newfstatat" fs/stat.c
-
-          echo
-          echo "===== kernel/reboot.c ====="
-          grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c
-
-      - name: "07 - Create KernelSU manual hook patch"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          cat > /tmp/ksu-next-manual.patch <<'PATCH'
-          diff --git a/fs/exec.c b/fs/exec.c
-          --- a/fs/exec.c
-          +++ b/fs/exec.c
-          @@ -1886,12 +1886,26 @@ static int do_execveat_common(int fd, struct filename *filename,
-           	return retval;
-           }
-           
-          +#ifdef CONFIG_KSU
-          +__attribute__((hot))
-          +extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-          +				void *argv, void *envp, int *flags);
-          +#endif
-          +
-           int do_execve(struct filename *filename,
-           	const char __user *const __user *__argv,
-           	const char __user *const __user *__envp)
-           {
-           	struct user_arg_ptr argv = { .ptr.native = __argv };
-           	struct user_arg_ptr envp = { .ptr.native = __envp };
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-          +#endif
-           	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
-           }
-           
-           @@ -1919,6 +1933,10 @@
-           	static int compat_do_execve(struct filename *filename,
-           		.is_compat = true,
-           		.ptr.compat = __envp,
-           	};
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-          +#endif
-           	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
-           }
-
-          diff --git a/fs/open.c b/fs/open.c
-          --- a/fs/open.c
-          +++ b/fs/open.c
-          @@ -1,3 +1,9 @@
-          +#ifdef CONFIG_KSU
-          +__attribute__((hot))
-          +extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-          +				int *mode, int *flags);
-          +#endif
-          +
-           /*
-            * access() needs to use the real uid/gid, not the effective uid/gid.
-            * We do this by temporarily clearing all FS-related capabilities and
-          @@ -1,3 +7,7 @@
-           	unsigned int lookup_flags = LOOKUP_FOLLOW;
-           
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-          +#endif
-          +
-           	if (mode & ~S_IRWXO)
-           		return -EINVAL;
-
-          diff --git a/fs/read_write.c b/fs/read_write.c
-          --- a/fs/read_write.c
-          +++ b/fs/read_write.c
-          @@ -568,11 +568,19 @@ static inline void file_pos_write(struct file *file, loff_t pos)
-           		file->f_pos = pos;
-           }
-           
-          +#ifdef CONFIG_KSU
-          +extern bool ksu_vfs_read_hook __read_mostly;
-          +extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
-          +				char __user **buf_ptr, size_t *count_ptr);
-          +#endif
-          +
-           SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-           {
-           	struct fd f = fdget_pos(fd);
-           	ssize_t ret = -EBADF;
-           
-          +#ifdef CONFIG_KSU
-          +	if (unlikely(ksu_vfs_read_hook))
-          +		ksu_handle_sys_read(fd, &buf, &count);
-          +#endif
-           	if (f.file) {
-           		loff_t pos = file_pos_read(f.file);
-           		ret = vfs_read(f.file, buf, count, &pos);
-
-          diff --git a/fs/stat.c b/fs/stat.c
-          --- a/fs/stat.c
-          +++ b/fs/stat.c
-          @@ -353,6 +353,10 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
-           	return cp_new_stat(&stat, statbuf);
-           }
-           
-          +#ifdef CONFIG_KSU
-          +__attribute__((hot))
-          +extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-          +				int *flags);
-          +#endif
-          +
-           
-           #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
-           SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-           		struct stat __user *, statbuf, int, flag)
-           {
-           	struct kstat stat;
-           	int error;
-           
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_stat(&dfd, &filename, &flag);
-          +#endif
-           	error = vfs_fstatat(dfd, filename, &stat, flag);
-
-          diff --git a/kernel/reboot.c b/kernel/reboot.c
-          --- a/kernel/reboot.c
-          +++ b/kernel/reboot.c
-          @@ -277,6 +277,11 @@
-            *
-            * reboot doesn't sync: do that yourself before calling this.
-            */
-          +
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_sys_reboot(int magic1, int magic2,
-          +				unsigned int cmd, void __user **arg);
-          +#endif
-           
-           SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
-           		void __user *, arg)
-           {
-           	struct pid_namespace *pid_ns = task_active_pid_ns(current);
-           	char buffer[256];
-           	int ret = 0;
-           
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
-          +#endif
-           	/* We only trust the superuser with rebooting the system. */
-           	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT)
-          PATCH
-
-          echo "Patch created:"
-          wc -l /tmp/ksu-next-manual.patch
-
-      - name: "08 - Check manual hook patch"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          git apply --check /tmp/ksu-next-manual.patch
-
-          echo "Patch applies cleanly."
-
-      - name: "09 - Apply manual hooks"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          git apply /tmp/ksu-next-manual.patch
-
-          echo "Manual hooks applied."
-
-      - name: "10 - Verify manual hooks"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          echo "===== exec.c ====="
           grep -n "ksu_handle_execveat" fs/exec.c
-
-          echo
-          echo "===== open.c ====="
           grep -n "ksu_handle_faccessat" fs/open.c
-
-          echo
-          echo "===== read_write.c ====="
           grep -n "ksu_handle_sys_read" fs/read_write.c
-
-          echo
-          echo "===== stat.c ====="
+          grep -n "ksu_vfs_read_hook" fs/read_write.c
           grep -n "ksu_handle_stat" fs/stat.c
-
-          echo
-          echo "===== reboot.c ====="
           grep -n "ksu_handle_sys_reboot" kernel/reboot.c
 
-      - name: "11 - Configure kernel"
+          echo "=== Hook check completed ==="
+
+      - name: Prepare output directory
         working-directory: kernel
         run: |
-          set -euxo pipefail
+          mkdir -p out
 
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+      - name: Configure kernel
+        working-directory: kernel
+        env:
+          PATH: ${{ github.workspace }}/clang/bin:${{ env.PATH }}
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
 
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          make \
-            O=out \
+          echo "=== Running vendor defconfig ==="
+
+          make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             vendor/bengal-perf_defconfig
 
-          KCONFIG_CONFIG="$PWD/out/.config" \
+          echo "=== Merging GTA4L configuration ==="
+
+          KCONFIG_CONFIG="${PWD}/out/.config" \
             ./scripts/kconfig/merge_config.sh \
-            -m \
-            -r \
+            -m -r \
             -O out \
             out/.config \
             arch/arm64/configs/vendor/gta4l-common.config
 
-          ./scripts/config \
-            --file out/.config \
-            --enable CONFIG_KSU \
-            --enable CONFIG_COMPAT \
-            --disable CONFIG_KPROBES \
-            --disable CONFIG_KPROBE_EVENTS \
-            --disable CONFIG_KSU_KPROBE_HOOKS \
-            --disable CONFIG_COMPAT_VDSO \
-            --disable CONFIG_VDSO32
+          echo "=== Enabling KernelSU-Next ==="
 
-          make \
-            O=out \
+          ./scripts/config --file out/.config \
+            --enable KSU \
+            --disable KSU_TRACEPOINT_HOOK \
+            --enable KSU_MANUAL_HOOK
+
+          echo "=== Keeping required 32-bit compatibility ==="
+
+          ./scripts/config --file out/.config \
+            --enable COMPAT \
+            --disable COMPAT_VDSO \
+            --disable VDSO32
+
+          echo "=== KernelSU-Next configuration ==="
+
+          ./scripts/config --file out/.config \
+            --enable KSU
+
+          echo "=== Updating configuration ==="
+
+          make O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             olddefconfig
 
-      - name: "12 - Verify configuration"
+          echo "=== Relevant configuration ==="
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_COMPAT=|CONFIG_COMPAT_VDSO|CONFIG_VDSO32|CONFIG_MODULES=|CONFIG_LTO_CLANG=|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_KALLSYMS_ALL=|CONFIG_GTA4L_DTB=)' \
+            out/.config || true
+
+      - name: Build kernel
         working-directory: kernel
+        env:
+          PATH: ${{ github.workspace }}/clang/bin:${{ env.PATH }}
         run: |
-          set -euxo pipefail
+          set -e
 
-          echo "===== KSU ====="
-          grep '^CONFIG_KSU=' out/.config
-
-          echo
-          echo "===== KPROBES ====="
-          grep -E \
-            '^# CONFIG_(KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set' \
-            out/.config
-
-          echo
-          echo "===== EXISTING CONFIG ====="
-          grep -E \
-            '^(CONFIG_COMPAT|CONFIG_MODULES|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_SHADOW_CALL_STACK|CONFIG_KALLSYMS_ALL|CONFIG_GTA4L_DTB)=' \
-            out/.config
-
-          echo
-          echo "===== VDSO ====="
-          grep -E \
-            '^# CONFIG_(COMPAT_VDSO|VDSO32) is not set' \
-            out/.config
-
-      - name: "13 - Build Image and Image.gz"
-        working-directory: kernel
-        run: |
-          set -euxo pipefail
-
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
 
           unset CROSS_COMPILE
           unset CROSS_COMPILE_ARM32
 
-          make \
-            -j"$(nproc)" \
+          echo "=== Building Image and Image.gz ==="
+
+          make -j$(nproc) \
             O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            Image \
-            Image.gz
+            Image Image.gz
 
-          echo
-          echo "===== BUILD SUCCESS ====="
+      - name: Verify kernel outputs
+        working-directory: kernel
+        run: |
+          set -e
 
-          ls -lh \
-            out/arch/arm64/boot/Image \
-            out/arch/arm64/boot/Image.gz
+          echo "=== Build outputs ==="
 
-          file \
-            out/arch/arm64/boot/Image \
-            out/arch/arm64/boot/Image.gz
+          ls -lh out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image.gz
 
-      - name: "14 - Upload artifacts"
-        if: success()
+          echo "=== File information ==="
+
+          file out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image.gz
+
+          echo "=== KernelSU objects ==="
+
+          find out -path '*kernelsu*' -type f | head -50 || true
+
+      - name: Prepare artifacts
+        working-directory: kernel
+        run: |
+          mkdir -p artifacts
+
+          cp out/arch/arm64/boot/Image \
+            artifacts/gta4l-kernelsu-next-Image
+
+          cp out/arch/arm64/boot/Image.gz \
+            artifacts/gta4l-kernelsu-next-Image.gz
+
+          cp out/.config \
+            artifacts/gta4l-kernelsu-next.config
+
+          cp System.map \
+            artifacts/gta4l-kernelsu-next-System.map \
+            2>/dev/null || true
+
+          echo "=== Artifacts ==="
+          ls -lh artifacts/
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gta4l-ksunext-manual
-          retention-days: 14
-          path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/arch/arm64/boot/Image.gz
-            kernel/out/.config
+          name: gta4l-kernelsu-next-kernel
+          path: kernel/artifacts/
+          if-no-files-found: error
